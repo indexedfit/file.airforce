@@ -3,4 +3,5 @@ node_modules
 repomix-output.xml
 data
 dist
+test-results
 

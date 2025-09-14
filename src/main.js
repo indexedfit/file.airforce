@@ -1,16 +1,40 @@
 import QRCode from 'qrcode'
 import { startHelia } from './heliaNode.js'
 import { createRoomManager } from './room.js'
-import { bindNavLinks, renderView } from './router.js'
+import { bindNavLinks, renderView, goto, currentView } from './router.js'
 import { renderAddresses, renderPeerTypes, renderPeerDetails, renderDrops, toast,
-         setPeerId, setConnCount, showCreateRoomPanel, showUploadProgress, updateProgress } from './ui.js'
-import { saveDrop, getDrops, saveRoom, getRoom } from './store.js'
+         setPeerId, setConnCount, showCreateRoomPanel, showUploadProgress, updateProgress,
+         renderRoomsList, renderRoomDetails, renderChatMessages } from './ui.js'
+import { saveDrop, getDrops, saveRoom, getRoom, getRooms, getChat, addChatMessage } from './store.js'
 import { TRACKERS } from './constants.js'
 import { listAddresses, countPeerTypes, peerDetails } from './peers.js'
 
 const $ = (id) => document.getElementById(id)
 
 let helia, fs, libp2p, rooms
+let activeRoomId = null
+let chatUnsub = null
+
+function urlFlag(name) { return new URLSearchParams(location.search).has(name) }
+
+async function startHeliaMaybeFake() {
+  if (urlFlag('fake')) {
+    const fakePeerId = 'fake-' + (crypto.randomUUID?.() || Math.random().toString(36).slice(2))
+    const fake = {
+      libp2p: { peerId: { toString: () => fakePeerId }, getConnections: () => [], getMultiaddrs: () => [] }
+    }
+    const fakeFs = {
+      async addBytes(bytes) {
+        // pseudo CID: bafk + base36 length + random
+        return { toString: () => `bafk${bytes.length.toString(36)}${Math.random().toString(36).slice(2, 8)}` }
+      }
+    }
+    // Pin API shim
+    fake.pin = { add: async function* () {} }
+    return { helia: fake, fs: fakeFs, libp2p: fake.libp2p }
+  }
+  return startHelia()
+}
 
 async function addFilesAndCreateManifest(files) {
   const manifest = { files: [] }
@@ -54,7 +78,7 @@ function showInvite(link) {
 }
 
 async function startUI() {
-  ({ helia, fs, libp2p } = await startHelia())
+  ({ helia, fs, libp2p } = await startHeliaMaybeFake())
   rooms = createRoomManager(helia, fs)
 
   setPeerId(libp2p.peerId.toString())
@@ -69,6 +93,7 @@ async function startUI() {
 
   bindNavLinks()
   renderView()
+  renderRoomsIfActive()
 
   // Global error handlers to avoid silent failures
   window.addEventListener('unhandledrejection', (e) => {
@@ -150,7 +175,10 @@ async function startUI() {
       rooms.attachHost(room)
       lastRoom = room
       renderDrops(getDrops().slice(0, 5), 'drops-list')
-      // Surface invite immediately
+      // Navigate to room + surface invite immediately
+      goto('rooms', { room: room.id })
+      activeRoomId = room.id
+      renderRoomsIfActive()
       showInvite(buildInviteURL(room.id))
       toast('Room created and files pinned locally')
     } catch (err) {
@@ -188,28 +216,91 @@ async function startUI() {
     const existing = getRoom(roomId)
     if (!existing) saveRoom({ id: roomId, name: `Room ${roomId.slice(0,6)}`, createdAt: Date.now() })
     rooms.attachJoin(roomId, (manifest) => {
-      const list = document.createElement('div')
-      list.className = 'mt-3 text-sm'
-      list.innerHTML = `
-        <div class="font-medium mb-1">Files in room:</div>
-        <ul class="space-y-1">${manifest.files.map(f => `
-          <li class=\"flex items-center gap-2\">\n            <input type=\"checkbox\" data-cid=\"${f.cid}\" checked/>\n            <span>${f.name}</span>\n            <span class=\"text-xs text-gray-500\">${f.size} bytes</span>\n          </li>`).join('')}</ul>
-        <button id="btn-request-files" class="mt-2 px-2 py-1 border rounded">Request & Mirror</button>
-      `
-      const roomsInfo = $('rooms-info'); roomsInfo.innerHTML = ''
-      roomsInfo.appendChild(list)
-      $('btn-request-files').onclick = async () => {
-        const cids = [...roomsInfo.querySelectorAll('input[type="checkbox"]:checked')].map(i => i.dataset.cid)
-        if (!cids.length) return toast('Select at least one file')
-        rooms.requestFiles(roomId, cids).catch(() => {})
-        for (const cid of cids) {
-          try { for await (const _ of helia.pin.add(cid)) {} } catch {}
-        }
-        toast('Requested and mirrored selected files')
-      }
+      saveRoom({ id: roomId, manifest })
+      renderRoomsIfActive()
     })
+    goto('rooms', { room: roomId })
+    activeRoomId = roomId
+    renderRoomsIfActive()
     toast(`Joined room ${roomId}`)
   }
+
+  // ---------- Rooms view controller ----------
+  function bindRoomButtons(roomId) {
+    const roomsInfo = $('rooms-info')
+    const btnReq = document.getElementById('btn-request-files')
+    if (btnReq) btnReq.onclick = async () => {
+      const cids = [...roomsInfo.querySelectorAll('input[type="checkbox"]:checked')].map(i => i.dataset.cid)
+      if (!cids.length) return toast('Select at least one file')
+      rooms.requestFiles(roomId, cids).catch(() => {})
+      for (const cid of cids) {
+        try { for await (const _ of helia.pin.add(cid)) {} } catch {}
+      }
+      toast('Requested and mirrored selected files')
+    }
+
+    const input = document.getElementById('chat-input')
+    const send = document.getElementById('btn-chat-send')
+    if (send && input) {
+      const sendNow = async () => {
+        const text = input.value.trim(); if (!text) return
+        await rooms.sendChat(roomId, text)
+        addChatMessage(roomId, { type: 'CHAT', roomId, text, from: libp2p.peerId.toString(), ts: Date.now() })
+        input.value = ''
+        renderChatMessages(getChat(roomId), libp2p.peerId.toString())
+      }
+      send.onclick = sendNow
+      input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); sendNow() } }
+    }
+  }
+
+  function subscribeChat(roomId) {
+    if (chatUnsub) { chatUnsub(); chatUnsub = null }
+    chatUnsub = rooms.subscribe(roomId, (msg) => {
+      if (msg?.type !== 'CHAT') return
+      addChatMessage(roomId, msg)
+      if (roomId === activeRoomId && currentView() === 'rooms') {
+        renderChatMessages(getChat(roomId), libp2p.peerId.toString())
+      }
+    })
+  }
+
+  function renderRoomsIfActive() {
+    if (currentView() !== 'rooms') return
+    // rooms list
+    const list = getRooms()
+    renderRoomsList(list, (r) => {
+      goto('rooms', { room: r.id })
+      activeRoomId = r.id
+      renderRoomsIfActive()
+    })
+    // active room
+    const sp = new URLSearchParams(location.search)
+    const rid = sp.get('room')
+    if (!rid) return
+    activeRoomId = rid
+    const room = getRoom(rid)
+    if (room?.manifest) {
+      renderRoomDetails(room)
+      renderChatMessages(getChat(rid), libp2p.peerId.toString())
+      bindRoomButtons(rid)
+      subscribeChat(rid)
+    } else {
+      // request manifest by sending HELLO if not yet known
+      rooms.attachJoin(rid, (manifest) => {
+        saveRoom({ id: rid, manifest })
+        renderRoomsIfActive()
+      })
+      renderRoomDetails({ id: rid, name: room?.name || `Room ${rid.slice(0,6)}`, manifest: { files: [] } })
+      bindRoomButtons(rid)
+      subscribeChat(rid)
+    }
+  }
+
+  window.addEventListener('popstate', () => {
+    renderView()
+    renderRoomsIfActive()
+  })
 }
 
 startUI().catch((e) => {

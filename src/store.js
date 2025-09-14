@@ -36,3 +36,13 @@ export function setPeerNickname(peerId, nickname) {
   write(LS_PEERS, peers)
 }
 
+// ---- chat (per room) ----
+const CHAT_KEY = (roomId) => `wc:chat:${roomId}`
+export function getChat(roomId) { return read(CHAT_KEY(roomId), []) }
+export function addChatMessage(roomId, msg, max = 200) {
+  const msgs = getChat(roomId)
+  msgs.push(msg)
+  if (msgs.length > max) msgs.splice(0, msgs.length - max)
+  write(CHAT_KEY(roomId), msgs)
+  return msgs
+}

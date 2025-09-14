@@ -1,38 +1,89 @@
 import { ROOM_TOPIC } from './constants.js'
-import { updateRoomLastSeen } from './store.js'
+import { saveRoom, updateRoomLastSeen } from './store.js'
 
 function enc(obj) { return new TextEncoder().encode(JSON.stringify(obj)) }
 function dec(buf) { return JSON.parse(new TextDecoder().decode(buf)) }
 
 export function createRoomManager(helia, fs) {
-  const { libp2p } = helia
+  const libp2p = helia?.libp2p
+
+  // Fallback pubsub for fake/dev mode (BroadcastChannel per topic)
+  const bcMap = new Map() // topic -> BroadcastChannel
+
+  // roomId -> { handler: fn, count: number }
+  const topicHandlers = new Map()
+  // roomId -> Set<fn>
   const subs = new Map()
 
   async function publish(roomId, msg) {
-    await libp2p.services.pubsub.publish(ROOM_TOPIC(roomId), enc(msg))
+    const topic = ROOM_TOPIC(roomId)
+    if (libp2p?.services?.pubsub) {
+      await libp2p.services.pubsub.publish(topic, enc(msg))
+    } else {
+      let bc = bcMap.get(topic)
+      if (!bc) { bc = new BroadcastChannel(topic); bcMap.set(topic, bc) }
+      bc.postMessage(enc(msg))
+    }
+  }
+
+  function ensureTopicListener(roomId) {
+    if (topicHandlers.has(roomId)) return
+    const topic = ROOM_TOPIC(roomId)
+    if (libp2p?.services?.pubsub) {
+      const handler = (evt) => {
+        if (evt.detail.topic !== topic) return
+        const fns = subs.get(roomId); if (!fns?.size) return
+        try {
+          const m = dec(evt.detail.data)
+          for (const fn of fns) fn(m, evt.detail)
+        } catch {}
+      }
+      libp2p.services.pubsub.subscribe(topic)
+      libp2p.services.pubsub.addEventListener('message', handler)
+      topicHandlers.set(roomId, { handler, count: 0 })
+    } else {
+      let bc = bcMap.get(topic)
+      if (!bc) { bc = new BroadcastChannel(topic); bcMap.set(topic, bc) }
+      const handler = (ev) => {
+        const fns = subs.get(roomId); if (!fns?.size) return
+        try {
+          const m = dec(ev.data)
+          for (const fn of fns) fn(m, { from: 'local' })
+        } catch {}
+      }
+      bc.addEventListener('message', handler)
+      topicHandlers.set(roomId, { handler, count: 0 })
+    }
   }
 
   function subscribe(roomId, onMessage) {
-    const topic = ROOM_TOPIC(roomId)
-    const handler = (evt) => {
-      if (evt.detail.topic !== topic) return
-      try {
-        const m = dec(evt.detail.data)
-        onMessage(m, evt.detail)
-      } catch {}
-    }
-    libp2p.services.pubsub.subscribe(topic)
-    libp2p.services.pubsub.addEventListener('message', handler)
-    subs.set(roomId, handler)
+    ensureTopicListener(roomId)
+    let set = subs.get(roomId)
+    if (!set) { set = new Set(); subs.set(roomId, set) }
+    set.add(onMessage)
+    const t = topicHandlers.get(roomId)
+    if (t) t.count++
+    return () => unsubscribe(roomId, onMessage)
   }
 
-  function unsubscribe(roomId) {
+  function unsubscribe(roomId, fn) {
     const topic = ROOM_TOPIC(roomId)
-    const handler = subs.get(roomId)
-    if (handler) {
-      libp2p.services.pubsub.removeEventListener('message', handler)
-      libp2p.services.pubsub.unsubscribe(topic)
-      subs.delete(roomId)
+    const set = subs.get(roomId)
+    if (set) {
+      if (fn) set.delete(fn); else set.clear()
+      if (set.size === 0) {
+        subs.delete(roomId)
+        const th = topicHandlers.get(roomId)
+        if (th) {
+          if (libp2p?.services?.pubsub) {
+            libp2p.services.pubsub.removeEventListener('message', th.handler)
+            libp2p.services.pubsub.unsubscribe(topic)
+          } else {
+            const bc = bcMap.get(topic); bc?.removeEventListener('message', th.handler)
+          }
+          topicHandlers.delete(roomId)
+        }
+      }
     }
   }
 
@@ -52,6 +103,11 @@ export function createRoomManager(helia, fs) {
     await publish(roomId, { type: 'ACK', roomId, info })
   }
 
+  async function sendChat(roomId, text) {
+    const from = libp2p?.peerId?.toString?.() || 'anon'
+    await publish(roomId, { type: 'CHAT', roomId, text, from, ts: Date.now() })
+  }
+
   function attachHost(room) {
     const { id: roomId, manifest } = room
     subscribe(roomId, async (msg) => {
@@ -66,6 +122,10 @@ export function createRoomManager(helia, fs) {
           }
           await sendAck(roomId, { ok: true, pinned: msg.fileCids.length })
           break
+        case 'MANIFEST':
+          // peers may rehost and announce updates; persist
+          if (msg.manifest) saveRoom({ id: roomId, manifest: msg.manifest })
+          break
       }
     })
   }
@@ -74,6 +134,8 @@ export function createRoomManager(helia, fs) {
     subscribe(roomId, async (msg) => {
       updateRoomLastSeen(roomId)
       if (msg.type === 'MANIFEST' && msg.manifest) {
+        // persist and bubble to UI
+        saveRoom({ id: roomId, manifest: msg.manifest })
         onManifest(msg.manifest)
       }
     })
@@ -82,8 +144,7 @@ export function createRoomManager(helia, fs) {
 
   return {
     publish, subscribe, unsubscribe,
-    sendHello, sendManifest, requestFiles, sendAck,
+    sendHello, sendManifest, requestFiles, sendAck, sendChat,
     attachHost, attachJoin
   }
 }
-

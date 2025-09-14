@@ -9,6 +9,7 @@
     "dev": "node -e \"fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.copyFileSync('src/index.html','dist/index.html')\" && esbuild src/main.js --serve --sourcemap --bundle --outdir=dist --servedir=dist",
     "start": "npm run dev",
     "test": "node tests/smoke.mjs && node tests/router.mjs",
+    "test:e2e": "playwright install --with-deps && playwright test",
     "start:relay": "node server/relay.js",
     "start:tracker": "node server/tracker.js",
     "start:newtracker": "node server/newtracker.js"
@@ -43,6 +44,7 @@
   "devDependencies": {
     "esbuild": "^0.21.3",
     "rimraf": "^5.0.7",
-    "jsdom": "^24.1.0"
+    "jsdom": "^24.1.0",
+    "@playwright/test": "^1.47.2"
   }
 }
