@@ -184,6 +184,16 @@ export function renderRoomDetails(room, opts = {}) {
           )
           .join("")}</ul>
         <button id="btn-request-files" class="mt-2 px-2 py-1 border rounded">Request & Mirror</button>
+
+        <div class="mt-4 p-3 bg-gray-50 border rounded">
+          <div class="font-medium mb-1">Add files to this room</div>
+          <div id="room-dropzone" class="border-2 border-dashed rounded p-4 text-center text-xs text-gray-600 bg-white hover:bg-gray-50">
+            <input id="room-file-input" type="file" multiple class="hidden"/>
+            <p>Drag & drop, or <button type="button" id="btn-room-browse" class="underline">browse</button></p>
+          </div>
+          <ul id="room-selected-files" class="mt-2 text-sm divide-y"></ul>
+          <button id="btn-add-to-room" class="mt-2 px-2 py-1 border rounded">Add Selected</button>
+        </div>
       </div>
       <div>
         <div class="font-medium mb-1">Chat</div>

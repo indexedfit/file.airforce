@@ -69,7 +69,7 @@ async function startHeliaMaybeFake() {
 }
 
 async function addFilesAndCreateManifest(files) {
-  const manifest = { files: [] };
+  const manifest = { files: [], seq: Date.now(), updatedAt: Date.now() };
   let done = 0;
   showUploadProgress(true);
   try {
@@ -212,6 +212,32 @@ async function startUI() {
 
   // Keep selected files in state; don't assign to input.files (read-only in many browsers)
   let selectedFiles = [];
+  function renderSelectedFiles() {
+    const panel = $("selected-files-panel");
+    const ul = $("selected-file-list");
+    if (!panel || !ul) return;
+    panel.classList.toggle("hidden", selectedFiles.length === 0);
+    const frag = document.createDocumentFragment();
+    selectedFiles.forEach((f, idx) => {
+      const li = document.createElement("li");
+      li.className = "py-1 flex items-center gap-2";
+      const name = document.createElement("span");
+      name.className = "flex-1 truncate";
+      name.textContent = `${f.name} (${f.size} bytes)`;
+      const rm = document.createElement("button");
+      rm.className = "px-2 py-0.5 text-xs border rounded";
+      rm.textContent = "Remove";
+      rm.onclick = () => {
+        selectedFiles.splice(idx, 1);
+        renderSelectedFiles();
+      };
+      li.append(name, rm);
+      const frag2 = document.createDocumentFragment();
+      frag2.appendChild(li);
+      frag.appendChild(frag2);
+    });
+    ul.replaceChildren(frag);
+  }
 
   browse.onclick = () => fileInput.click();
   dropzone.ondragover = (e) => {
@@ -220,25 +246,18 @@ async function startUI() {
   };
   dropzone.ondragleave = () => dropzone.classList.remove("bg-white");
   async function handleSelectedFiles(files) {
-    selectedFiles = Array.from(files || []);
+    // append (dedupe by name+size+lastModified for UX)
+    const key = (f) => `${f.name}:${f.size}:${f.lastModified ?? 0}`;
+    const seen = new Set(selectedFiles.map(key));
+    for (const f of Array.from(files || [])) {
+      const k = key(f);
+      if (!seen.has(k)) {
+        selectedFiles.push(f);
+        seen.add(k);
+      }
+    }
     showCreateRoomPanel(selectedFiles.length > 0);
-    try {
-      const note = document.createElement("div");
-      note.className = "mt-2 text-xs text-gray-600";
-      note.id = "selected-files-note";
-      const names = selectedFiles
-        .slice(0, 5)
-        .map((f) => f.name)
-        .join(", ");
-      note.textContent = selectedFiles.length
-        ? `Selected ${selectedFiles.length} file(s): ${names}${
-            selectedFiles.length > 5 ? "…" : ""
-          }`
-        : "";
-      const prev = document.getElementById("selected-files-note");
-      if (prev?.parentElement) prev.parentElement.removeChild(prev);
-      dropzone.appendChild(note);
-    } catch {}
+    renderSelectedFiles();
 
     // Auto-create room+drop unless we’re in a join context
     if (!isJoinContext() && selectedFiles.length) {
@@ -391,7 +410,7 @@ async function startUI() {
       const sendNow = async () => {
         const text = input.value.trim();
         if (!text) return;
-        await rooms.sendChat(roomId, text);
+        // Local echo immediately; network send is fire-and-forget (room outbox handles backoff)
         addChatMessage(roomId, {
           type: "CHAT",
           roomId,
@@ -399,6 +418,7 @@ async function startUI() {
           from: libp2p.peerId.toString(),
           ts: Date.now(),
         });
+        rooms.sendChat(roomId, text).catch(() => {});
         input.value = "";
         renderChatMessages(getChat(roomId), libp2p.peerId.toString());
       };
@@ -407,6 +427,88 @@ async function startUI() {
         if (e.key === "Enter") {
           e.preventDefault();
           sendNow();
+        }
+      };
+    }
+
+    // ---- Add-files-to-room mini component ----
+    const rDrop = document.getElementById("room-dropzone");
+    const rInput = document.getElementById("room-file-input");
+    const rBrowse = document.getElementById("btn-room-browse");
+    const rList = document.getElementById("room-selected-files");
+    const rAdd = document.getElementById("btn-add-to-room");
+    let pendingRoomFiles = [];
+    const renderRoomSel = () => {
+      if (!rList) return;
+      const frag = document.createDocumentFragment();
+      pendingRoomFiles.forEach((f, idx) => {
+        const li = document.createElement("li");
+        li.className = "py-1 flex items-center gap-2";
+        const name = document.createElement("span");
+        name.className = "flex-1 truncate";
+        name.textContent = `${f.name} (${f.size} bytes)`;
+        const rm = document.createElement("button");
+        rm.className = "px-2 py-0.5 text-xs border rounded";
+        rm.textContent = "Remove";
+        rm.onclick = () => {
+          pendingRoomFiles.splice(idx, 1);
+          renderRoomSel();
+        };
+        li.append(name, rm);
+        frag.appendChild(li);
+      });
+      rList.replaceChildren(frag);
+    };
+    const pushFiles = (files) => {
+      const key = (f) => `${f.name}:${f.size}:${f.lastModified ?? 0}`;
+      const seen = new Set(pendingRoomFiles.map(key));
+      for (const f of Array.from(files || [])) {
+        const k = key(f);
+        if (!seen.has(k)) {
+          pendingRoomFiles.push(f);
+          seen.add(k);
+        }
+      }
+      renderRoomSel();
+    };
+    if (rBrowse && rInput) rBrowse.onclick = () => rInput.click();
+    if (rInput) rInput.onchange = () => pushFiles(rInput.files);
+    if (rDrop) {
+      rDrop.ondragover = (e) => { e.preventDefault(); rDrop.classList.add("bg-gray-100"); };
+      rDrop.ondragleave = () => rDrop.classList.remove("bg-gray-100");
+      rDrop.ondrop = (e) => {
+        e.preventDefault();
+        rDrop.classList.remove("bg-gray-100");
+        pushFiles(e.dataTransfer.files);
+      };
+    }
+    if (rAdd) {
+      rAdd.onclick = async () => {
+        if (!pendingRoomFiles.length) return toast("Select files first");
+        try {
+          const added = await addFilesAndCreateManifest(pendingRoomFiles);
+          // merge with current manifest
+          const cur = getRoom(roomId)?.manifest || { files: [], seq: 0 };
+          const byCid = new Map(cur.files.map((f) => [f.cid, f]));
+          for (const f of added.files) byCid.set(f.cid, f);
+          const merged = {
+            files: [...byCid.values()],
+            seq: (cur.seq || 0) + 1,
+            updatedAt: Date.now(),
+          };
+          saveRoom({ id: roomId, manifest: merged });
+          rooms.sendManifest(roomId, merged).catch(() => {});
+          // Pin new ones locally too
+          for (const f of added.files) {
+            try { for await (const _ of helia.pin.add(f.cid)) {} } catch {}
+          }
+          pendingRoomFiles = [];
+          renderRoomSel();
+          renderRoomsIfActive();
+          toast("Files added to room");
+        } catch (e) {
+          console.error(e);
+          toast("Failed to add files");
         }
       };
     }

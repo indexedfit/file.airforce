@@ -19,12 +19,64 @@ export function createRoomManager(helia, fs) {
   // roomId -> Set<fn>
   const subs = new Map();
 
+  // --------- tiny per-topic outbox with exponential backoff ----------
+  // topic -> { queue: any[], attempts: number, timer: any }
+  const outbox = new Map();
+  const MAX_BACKOFF_MS = 8000;
+  const BASE_MS = 250;
+
+  const getSubsFor = (topic) => {
+    try {
+      return libp2p?.services?.pubsub?.getSubscribers?.(topic) ?? [];
+    } catch {
+      return [];
+    }
+  };
+
+  function scheduleFlush(topic) {
+    const entry = outbox.get(topic);
+    if (!entry || entry.timer) return;
+    const delay =
+      Math.min(BASE_MS * Math.pow(2, entry.attempts || 0), MAX_BACKOFF_MS) +
+      Math.floor(Math.random() * 200);
+    entry.timer = setTimeout(async () => {
+      entry.timer = null;
+      const hasSubs = getSubsFor(topic).length > 0;
+      if (!hasSubs) {
+        entry.attempts = Math.min((entry.attempts || 0) + 1, 8);
+        scheduleFlush(topic);
+        return;
+      }
+      // Flush all queued messages in order
+      while (entry.queue.length) {
+        const msg = entry.queue.shift();
+        try {
+          await libp2p.services.pubsub.publish(topic, enc(msg));
+        } catch {
+          // put it back and retry later
+          entry.queue.unshift(msg);
+          entry.attempts = Math.min((entry.attempts || 0) + 1, 8);
+          break;
+        }
+      }
+      if (entry.queue.length) scheduleFlush(topic);
+      else entry.attempts = 0;
+    }, delay);
+  }
+
+  // Nudge the outbox whenever new peers connect.
+  if (libp2p?.addEventListener) {
+    libp2p.addEventListener("peer:connect", () => {
+      for (const topic of outbox.keys()) scheduleFlush(topic);
+    });
+  }
+
   async function waitForSubs(topic, timeoutMs = 3000) {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try {
-        const subs = libp2p?.services?.pubsub?.getSubscribers?.(topic) || [];
-        if (subs.length > 0) return true;
+        const s = libp2p?.services?.pubsub?.getSubscribers?.(topic) || [];
+        if (s.length > 0) return true;
       } catch {}
       await new Promise((r) => setTimeout(r, 120));
     }
@@ -34,18 +86,20 @@ export function createRoomManager(helia, fs) {
   async function publish(roomId, msg, attempt = 0) {
     const topic = ROOM_TOPIC(roomId);
     if (libp2p?.services?.pubsub) {
-      // Small grace period for the mesh to form; then publish
-      if (attempt === 0) await waitForSubs(topic, 1500);
-      try {
-        await libp2p.services.pubsub.publish(topic, enc(msg));
-      } catch (e) {
-        // Retry a few times if no peers yet
-        if (String(e?.message || e).includes("NoPeersSubscribedToTopic") && attempt < 5) {
-          await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
-          return publish(roomId, msg, attempt + 1);
+      // If no known subscribers yet, enqueue + backoff instead of dropping.
+      const hasSubs = getSubsFor(topic).length > 0;
+      if (!hasSubs) {
+        let entry = outbox.get(topic);
+        if (!entry) {
+          entry = { queue: [], attempts: 0, timer: null };
+          outbox.set(topic, entry);
         }
-        throw e;
+        entry.queue.push(msg);
+        scheduleFlush(topic);
+        return;
       }
+      // We have subs: just publish.
+      await libp2p.services.pubsub.publish(topic, enc(msg));
     } else {
       let bc = bcMap.get(topic);
       if (!bc) {
@@ -154,7 +208,8 @@ export function createRoomManager(helia, fs) {
 
   async function sendChat(roomId, text) {
     const from = libp2p?.peerId?.toString?.() || "anon";
-    await publish(roomId, { type: "CHAT", roomId, text, from, ts: Date.now() });
+    // Fire-and-forget; outbox/backoff handles delivery
+    publish(roomId, { type: "CHAT", roomId, text, from, ts: Date.now() }).catch(() => {});
   }
 
   // If invite included ?host= and ?tracker=, dial the host immediately via the tracker relay.
@@ -194,16 +249,23 @@ export function createRoomManager(helia, fs) {
           break;
       }
     });
-    // Also broadcast the manifest proactively once.
-    sendManifest(roomId, manifest).catch(() => {});
+    // Proactively (re)announce manifest a few times to beat mesh race.
+    let bursts = 0;
+    const t = setInterval(() => {
+      bursts++;
+      sendManifest(roomId, manifest).catch(() => {});
+      if (bursts >= 5) clearInterval(t);
+    }, 600 + Math.floor(Math.random() * 250));
   }
 
   function attachJoin(roomId, onManifest) {
     // Be aggressive: connect to the host right away using the relay in the invite.
     tryDialHostFromInvite().catch(() => {});
+    let gotManifest = false;
     subscribe(roomId, async (msg) => {
       updateRoomLastSeen(roomId);
       if (msg.type === "MANIFEST" && msg.manifest) {
+        gotManifest = true;
         // persist and bubble to UI
         saveRoom({ id: roomId, manifest: msg.manifest });
         onManifest(msg.manifest);
@@ -222,7 +284,16 @@ export function createRoomManager(helia, fs) {
         }
       }
     });
-    sendHello(roomId).catch(() => {});
+    // Retry HELLO with backoff until we see a MANIFEST (bounded).
+    let attempts = 0;
+    const helloTick = async () => {
+      if (gotManifest || attempts >= 8) return;
+      attempts++;
+      sendHello(roomId).catch(() => {});
+      const delay = Math.min(400 * Math.pow(1.6, attempts), 5000);
+      setTimeout(helloTick, delay);
+    };
+    helloTick();
   }
 
   return {

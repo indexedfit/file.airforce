@@ -69,7 +69,7 @@ const ROOM_IDS = (process.env.ROOM_IDS || '').split(',').map(s => s.trim()).filt
 
 const LISTEN_WS = process.env.LISTEN_WS || '/ip4/0.0.0.0/tcp/9001/ws'
 const LISTEN_TCP = process.env.LISTEN_TCP || '/ip4/0.0.0.0/tcp/9002'
-const LISTEN_WT  = process.env.LISTEN_WT  || '' // e.g. '/ip4/0.0.0.0/udp/9443/quic-v1/webtransport'
+const LISTEN_WT = process.env.LISTEN_WT || '' // e.g. '/ip4/0.0.0.0/udp/9443/quic-v1/webtransport'
 const LISTEN_WEBRTC = process.env.LISTEN_WEBRTC || '' // e.g. '/ip4/0.0.0.0/udp/9091/webrtc-direct' (see docs)
 
 const BOOTSTRAP = (process.env.BOOTSTRAP || '')
@@ -103,23 +103,23 @@ function extractCids(bytes) {
     const obj = JSON.parse(u8ToString(bytes))
     const arr = Array.isArray(obj) ? obj : (obj?.cids ?? [obj?.cid]).filter(Boolean)
     for (const v of arr) {
-      try { out.add(CID.parse(String(v)).toString()) } catch {}
+      try { out.add(CID.parse(String(v)).toString()) } catch { }
     }
   } catch {
     const text = u8ToString(bytes)
     const re = /\b(bafy[0-9a-z]{20,}|Qm[1-9A-HJ-NP-Za-km-z]{44,})\b/g
     for (const m of text.matchAll(re)) {
-      try { out.add(CID.parse(m[1]).toString()) } catch {}
+      try { out.add(CID.parse(m[1]).toString()) } catch { }
     }
     const reUrl = /\bipfs:\/\/([A-Za-z0-9]+)\b/g
     for (const m of text.matchAll(reUrl)) {
-      try { out.add(CID.parse(m[1]).toString()) } catch {}
+      try { out.add(CID.parse(m[1]).toString()) } catch { }
     }
   }
   return [...out].map(s => CID.parse(s))
 }
 
-async function consume(asyncIt) { for await (const _ of asyncIt) {} }
+async function consume(asyncIt) { for await (const _ of asyncIt) { } }
 
 async function main() {
   // ---------- libp2p ----------
@@ -184,7 +184,7 @@ async function main() {
 
   function render() {
     const addrs = libp2p.getMultiaddrs().map(a => a.toString())
-    const top = [...pubs.entries()].sort((a,b)=>b[1].count-a[1].count).slice(0,5)
+    const top = [...pubs.entries()].sort((a, b) => b[1].count - a[1].count).slice(0, 5)
     return [
       `PeerID:        ${libp2p.peerId.toString()}`,
       `Multiaddrs:`,
@@ -200,7 +200,7 @@ async function main() {
       `Content topic: ${CONTENT_TOPIC}`,
       `Seen:          ${seen.size} | Pinned: ${pinned.size} | In-flight: ${pinInFlight}`,
       `Top publishers:`,
-      ...top.map(([p,info]) => `  • ${p} (${info.count}) last=${info.lastCid}`),
+      ...top.map(([p, info]) => `  • ${p} (${info.count}) last=${info.lastCid}`),
       ``
     ].join('\n')
   }
@@ -228,13 +228,14 @@ async function main() {
     }
 
     // Flow B: room REQUEST messages – pin requested fileCids
+    // make this better asap.
     if (topic.startsWith('wc/')) {
       try {
         const msg = JSON.parse(u8ToString(data || new Uint8Array()))
         if (msg && msg.type === 'REQUEST' && Array.isArray(msg.fileCids)) {
           cids = msg.fileCids.map((s) => CID.parse(String(s)))
         }
-      } catch {}
+      } catch { }
     }
 
     if (cids.length === 0) return
@@ -250,24 +251,24 @@ async function main() {
       if (pinned.has(s) || seen.has(s)) continue
       seen.add(s)
 
-      ;(async () => {
-        while (pinInFlight >= PIN_CONCURRENCY) await sleep(50)
-        pinInFlight++
-        try {
-          // Helia's pin API is helia.pin.add (yields progress)
-          await consume(helia.pin.add(cid, { recursive: true }))
-          pinned.add(s)
+        ; (async () => {
+          while (pinInFlight >= PIN_CONCURRENCY) await sleep(50)
+          pinInFlight++
+          try {
+            // Helia's pin API is helia.pin.add (yields progress)
+            await consume(helia.pin.add(cid, { recursive: true }))
+            pinned.add(s)
 
-          // Announce only if DHT is enabled
-          if (process.env.DHT_ENABLED === '1') {
-            await libp2p.contentRouting.provide(cid).catch(() => {})
+            // Announce only if DHT is enabled
+            if (process.env.DHT_ENABLED === '1') {
+              await libp2p.contentRouting.provide(cid).catch(() => { })
+            }
+          } catch (e) {
+            console.warn('[mirror] pin failed', s, e?.message)
+          } finally {
+            pinInFlight--
           }
-        } catch (e) {
-          console.warn('[mirror] pin failed', s, e?.message)
-        } finally {
-          pinInFlight--
-        }
-      })().catch(()=>{})
+        })().catch(() => { })
     }
   })
 
@@ -276,19 +277,19 @@ async function main() {
 
   // periodic GC (optional; pins protect)
   if (GC_INTERVAL_SECONDS > 0) {
-    ;(async () => {
+    ; (async () => {
       while (true) {
         await sleep(GC_INTERVAL_SECONDS * 1000)
-        try { await helia.gc() } catch {}
+        try { await helia.gc() } catch { }
       }
-    })().catch(()=>{})
+    })().catch(() => { })
   }
 
   const shutdown = async () => {
     clearInterval(uiTimer)
     logUpdate.clear()
-    await helia.stop().catch(()=>{})
-    await libp2p.stop().catch(()=>{})
+    await helia.stop().catch(() => { })
+    await libp2p.stop().catch(() => { })
     process.exit(0)
   }
   process.on('SIGINT', shutdown)
