@@ -19,10 +19,33 @@ export function createRoomManager(helia, fs) {
   // roomId -> Set<fn>
   const subs = new Map();
 
-  async function publish(roomId, msg) {
+  async function waitForSubs(topic, timeoutMs = 3000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const subs = libp2p?.services?.pubsub?.getSubscribers?.(topic) || [];
+        if (subs.length > 0) return true;
+      } catch {}
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    return false;
+  }
+
+  async function publish(roomId, msg, attempt = 0) {
     const topic = ROOM_TOPIC(roomId);
     if (libp2p?.services?.pubsub) {
-      await libp2p.services.pubsub.publish(topic, enc(msg));
+      // Small grace period for the mesh to form; then publish
+      if (attempt === 0) await waitForSubs(topic, 1500);
+      try {
+        await libp2p.services.pubsub.publish(topic, enc(msg));
+      } catch (e) {
+        // Retry a few times if no peers yet
+        if (String(e?.message || e).includes("NoPeersSubscribedToTopic") && attempt < 5) {
+          await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+          return publish(roomId, msg, attempt + 1);
+        }
+        throw e;
+      }
     } else {
       let bc = bcMap.get(topic);
       if (!bc) {

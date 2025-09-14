@@ -34,18 +34,11 @@ export async function startHelia() {
   const libp2p = await createLibp2p({
     metrics: inspectorMetrics(),
     addresses: { listen: ["/p2p-circuit", "/webrtc"] },
-    transports: [
-      webSockets(),
-      webTransport(),
-      webRTC(),
-      circuitRelayTransport(),
-    ],
+    // Reserve on discovered relays so others can dial us via /p2p-circuit
+    transports: [webSockets(), webTransport(), webRTC(), circuitRelayTransport({ discoverRelays: 1 })],
     connectionEncrypters: [noise()],
     // Ensure discovered peers are dialed so bitswap has paths immediately
-    connectionManager: {
-      maxConnections: 12,
-      autoDial: true,
-    },
+    connectionManager: { minConnections: 2, maxConnections: 12, autoDial: true },
     streamMuxers: [yamux()],
     connectionGater: {
       denyDialMultiaddr: async () => false,
@@ -58,9 +51,15 @@ export async function startHelia() {
       }),
     ],
     services: {
-      pubsub: gossipsub(),
+      // Don't throw if a user chats before the mesh forms (we also add retries below)
+      pubsub: gossipsub({ allowPublishToZeroPeers: true }),
       identify: identify(),
     },
+  });
+
+  // Autodial newly discovered peers (helps the mesh form fast)
+  libp2p.addEventListener("peer:discovery", (evt) => {
+    libp2p.dial(evt.detail.id).catch(() => {});
   });
 
   const helia = await createHelia({
@@ -72,6 +71,11 @@ export async function startHelia() {
 
   // Start Helia (starts its libp2p internally)
   if (typeof helia.start === "function") await helia.start();
+
+  // Make sure we are connected to our relays (establish/refresh reservations)
+  try {
+    await Promise.allSettled((TRACKERS_ACTIVE || []).map((ma) => libp2p.dial(ma)));
+  } catch {}
 
   return { helia, fs, libp2p };
 }
