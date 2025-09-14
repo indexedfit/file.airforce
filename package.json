@@ -1,0 +1,48 @@
+{
+  "name": "web.cleaning",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "clean": "rimraf dist",
+    "build": "node esbuild.js",
+    "dev": "node -e \"fs=require('fs');fs.mkdirSync('dist',{recursive:true});fs.copyFileSync('src/index.html','dist/index.html')\" && esbuild src/main.js --serve --sourcemap --bundle --outdir=dist --servedir=dist",
+    "start": "npm run dev",
+    "test": "node tests/smoke.mjs && node tests/router.mjs",
+    "start:relay": "node server/relay.js",
+    "start:tracker": "node server/tracker.js",
+    "start:newtracker": "node server/newtracker.js"
+  },
+  "dependencies": {
+    "@chainsafe/libp2p-gossipsub": "^14.1.1",
+    "@chainsafe/libp2p-noise": "^16.1.4",
+    "@chainsafe/libp2p-yamux": "^7.0.4",
+    "@helia/unixfs": "^5.0.0",
+    "@ipshipyard/libp2p-inspector-metrics": "^1.0.3",
+    "@libp2p/autonat": "^2.0.37",
+    "@libp2p/bootstrap": "^11.0.43",
+    "@libp2p/circuit-relay-v2": "^3.2.20",
+    "@libp2p/identify": "^3.0.37",
+    "@libp2p/pubsub-peer-discovery": "^11.0.2",
+    "@libp2p/tcp": "^10.1.17",
+    "@libp2p/webrtc": "^5.2.20",
+    "@libp2p/websockets": "^9.2.17",
+    "@libp2p/webtransport": "^5.0.47",
+    "@multiformats/multiaddr-matcher": "^3.0.1",
+    "date-fns": "^3.6.0",
+    "helia": "^5.0.0",
+    "libp2p": "^2.8.12",
+    "pretty-ms": "^9.0.0",
+    "qrcode": "^1.5.3",
+    "blockstore-fs": "^2.0.5",
+    "datastore-level": "^11.0.4",
+    "@helia/delegated-routing-v1-http-api-client": "^4.2.5",
+    "uint8arrays": "^5.1.0",
+    "log-update": "^6.1.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.3",
+    "rimraf": "^5.0.7",
+    "jsdom": "^24.1.0"
+  }
+}
