@@ -7,9 +7,14 @@ export function currentView() {
 }
 
 export function goto(view, extras = {}) {
-  const sp = new URLSearchParams(location.search)
+  if (view === 'home' && Object.keys(extras).length === 0) {
+    history.pushState(null, '', '/')
+    renderView()
+    return
+  }
+  const sp = new URLSearchParams()
   sp.set('view', view)
-  for (const [k, v] of Object.entries(extras)) sp.set(k, v)
+  for (const [k, v] of Object.entries(extras)) if (v != null) sp.set(k, v)
   history.pushState(null, '', `?${sp.toString()}`)
   renderView()
 }
@@ -32,4 +37,3 @@ export function bindNavLinks() {
   })
   window.addEventListener('popstate', renderView)
 }
-

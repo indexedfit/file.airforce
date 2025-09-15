@@ -17,7 +17,7 @@
     <div class="container mx-auto px-4 py-3 flex items-center gap-3">
       <h1 class="font-bold text-xl">web.cleaning</h1>
       <nav class="ml-auto text-sm flex gap-2">
-        <a href="?view=home" data-link class="px-2 py-1 rounded hover:bg-gray-100">Home</a>
+        <a href="/" data-link class="px-2 py-1 rounded hover:bg-gray-100">Home</a>
         <a href="?view=drops" data-link class="px-2 py-1 rounded hover:bg-gray-100">Drops</a>
         <a href="?view=rooms" data-link class="px-2 py-1 rounded hover:bg-gray-100">Rooms</a>
         <a href="?view=peers" data-link class="px-2 py-1 rounded hover:bg-gray-100">Peers</a>
@@ -27,20 +27,29 @@
 
   <main class="container mx-auto px-4 py-6 snap-scroll">
     <section class="mb-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-      <div class="bg-white border rounded p-3">
-        <div class="text-xs text-gray-500">Peer ID</div>
-        <div id="peer-id" class="font-mono text-xs break-all select-all">—</div>
-      </div>
-      <div class="bg-white border rounded p-3">
-        <div class="text-xs text-gray-500">Connections</div>
-        <div class="flex items-baseline gap-2">
-          <span id="conn-count" class="text-lg font-semibold">0</span>
-          <span class="text-xs text-gray-500">peers</span>
+      <div class="bg-white border rounded p-3 md:col-span-3">
+        <div class="flex items-center gap-3">
+          <div class="mr-4">
+            <div class="text-xs text-gray-500">Connections</div>
+            <div class="flex items-baseline gap-2">
+              <span id="conn-count" class="text-lg font-semibold">0</span>
+              <span class="text-xs text-gray-500">peers</span>
+            </div>
+          </div>
+          <button id="peer-info-toggle" class="px-2 py-1 border rounded text-xs">Details</button>
         </div>
-      </div>
-      <div class="bg-white border rounded p-3">
-        <div class="text-xs text-gray-500">Addresses</div>
-        <ul id="addr-list" class="text-xs space-y-1 max-h-24 overflow-auto"></ul>
+        <div id="peer-info-panel" class="mt-3 hidden">
+          <div class="grid md:grid-cols-3 gap-3">
+            <div>
+              <div class="text-xs text-gray-500">Peer ID</div>
+              <div id="peer-id" class="font-mono text-xs break-all select-all">—</div>
+            </div>
+            <div class="md:col-span-2">
+              <div class="text-xs text-gray-500">Addresses</div>
+              <ul id="addr-list" class="text-xs space-y-1 max-h-24 overflow-auto"></ul>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 

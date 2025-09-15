@@ -5,7 +5,7 @@ export const PUBSUB_PEER_DISCOVERY = "gayboys-inc";
 // need to autogenerate some local fellows for good E2E testing!
 // TODO: that.
 export const TRACKERS = [
-  "/ip4/127.0.0.1/tcp/9001/ws/p2p/12D3KooWLqQVEV8xeQPnXyLpTqF8FkGpk5gMLjME8sKZqFezTp8z",
+  "/ip4/127.0.0.1/tcp/9001/ws/p2p/12D3KooWGZcP7t6SBfFGJG9HYCAkFyWTJWMa538AUaVakuHfubRk",
   // public ones on ipfs.fyi/utils go here:
   // todo: cool DNS piggybacking and vibes.
 ];

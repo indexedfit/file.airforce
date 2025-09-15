@@ -226,6 +226,11 @@ async function startUI() {
   };
 
   setPeerId(libp2p.peerId.toString());
+  // Participate in content/control topics (simple and clean)
+  try {
+    libp2p.services?.pubsub?.subscribe?.(CONTENT_TOPIC);
+    libp2p.services?.pubsub?.subscribe?.(TRACKER_CONTROL);
+  } catch {}
   setInterval(() => {
     setConnCount(libp2p.getConnections().length);
     renderAddresses(listAddresses(libp2p));
@@ -238,6 +243,10 @@ async function startUI() {
   bindNavLinks();
   renderView();
   renderRoomsIfActive();
+  // Peer info collapsible panel toggle
+  const toggle = document.getElementById("peer-info-toggle");
+  const panel = document.getElementById("peer-info-panel");
+  if (toggle && panel) toggle.onclick = () => panel.classList.toggle("hidden");
 
   // Global error handlers to avoid silent failures
   window.addEventListener("unhandledrejection", (e) => {
@@ -652,6 +661,7 @@ startUI().catch((e) => {
 });
 // lightweight enc helper for tracker control
 function enc(obj) { return new TextEncoder().encode(JSON.stringify(obj)); }
+
 
 async function announceToTracker(roomId, manifest) {
   try {

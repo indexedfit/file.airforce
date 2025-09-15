@@ -246,13 +246,14 @@ async function main() {
       } catch { }
     }
 
-    // Flow B: room REQUEST messages – pin requested fileCids
-    // make this better asap.
+    // Flow B: room messages – pin requested fileCids or manifest files
     if (topic.startsWith('wc/')) {
       try {
         const msg = JSON.parse(u8ToString(data || new Uint8Array()))
         if (msg && msg.type === 'REQUEST' && Array.isArray(msg.fileCids)) {
           cids = msg.fileCids.map((s) => CID.parse(String(s)))
+        } else if (msg && msg.type === 'MANIFEST' && Array.isArray(msg?.manifest?.files)) {
+          cids = msg.manifest.files.map((f) => CID.parse(String(f.cid)))
         }
       } catch { }
     }
