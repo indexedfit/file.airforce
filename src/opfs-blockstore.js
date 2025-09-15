@@ -62,6 +62,7 @@ export async function createOPFSBlockstore(rootName = 'wc-blocks') {
         const [a, b, name] = splitCid(cid)
         const dir = await ensurePath(blocks, [a, b])
         await writeFile(dir, `${name}.bin`, bytes)
+        try { globalThis.wcOnBlockPut?.({ cid: cid.toString(), size: bytes?.length || 0 }) } catch {}
         return cid
       },
       async get(cid) {
@@ -108,6 +109,7 @@ export async function createOPFSBlockstore(rootName = 'wc-blocks') {
         req.onsuccess = () => res()
         req.onerror = () => rej(req.error)
       })
+      try { globalThis.wcOnBlockPut?.({ cid: cid.toString(), size: bytes?.length || 0 }) } catch {}
       return cid
     },
     async get(cid) {
@@ -148,4 +150,3 @@ export async function createOPFSBlockstore(rootName = 'wc-blocks') {
   }
   return api
 }
-

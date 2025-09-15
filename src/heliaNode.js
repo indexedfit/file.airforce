@@ -1,3 +1,4 @@
+// @ts-check
 import { createHelia } from "helia";
 import { unixfs } from "@helia/unixfs";
 import { createLibp2p } from "libp2p";
@@ -35,10 +36,10 @@ export async function startHelia() {
     metrics: inspectorMetrics(),
     addresses: { listen: ["/p2p-circuit", "/webrtc"] },
     // Reserve on discovered relays so others can dial us via /p2p-circuit
-    transports: [webSockets(), webTransport(), webRTC(), circuitRelayTransport({ discoverRelays: 1 })],
+    transports: [webSockets(), webTransport(), webRTC(), circuitRelayTransport({ discoverRelays: 2 })],
     connectionEncrypters: [noise()],
-    // Ensure discovered peers are dialed so bitswap has paths immediately
-    connectionManager: { minConnections: 2, maxConnections: 12, autoDial: true },
+    // Be a bit more eager: helps first-hop bootstrap & bitswap pathing
+    connectionManager: { minConnections: 4, maxConnections: 16, autoDial: true },
     streamMuxers: [yamux()],
     connectionGater: {
       denyDialMultiaddr: async () => false,
@@ -46,13 +47,18 @@ export async function startHelia() {
     peerDiscovery: [
       bootstrap({ list: TRACKERS_ACTIVE }),
       pubsubPeerDiscovery({
-        interval: 10_000,
+        interval: 3_000, // more eager
         topics: [PUBSUB_PEER_DISCOVERY],
       }),
     ],
     services: {
-      // Don't throw if a user chats before the mesh forms (we also add retries below)
-      pubsub: gossipsub({ allowPublishToZeroPeers: true }),
+      // No-throw publish while the mesh is still forming + faster heartbeats
+      pubsub: gossipsub({
+        allowPublishToZeroPeers: true,
+        // modestly faster heartbeats to mend meshes quicker (defaults ~1s)
+        // not too low (battery):
+        heartbeatInterval: 800,
+      }),
       identify: identify(),
     },
   });

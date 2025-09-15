@@ -13,6 +13,7 @@ import {
   showCreateRoomPanel,
   showUploadProgress,
   updateProgress,
+  // showFetchProgress is implemented locally below
   renderRoomsList,
   renderRoomDetails,
   renderChatMessages,
@@ -87,6 +88,48 @@ async function addFilesAndCreateManifest(files) {
   } finally {
     showUploadProgress(false);
   }
+}
+
+// ------- Small helpers for file open/download + progress -------
+function showFetchProgress(show, loaded = 0, total = 0, label = "") {
+  showUploadProgress(show);
+  const pct = total > 0 ? Math.round((loaded / total) * 100) : loaded > 0 ? 5 + (loaded % 50) : 0;
+  updateProgress(pct, label);
+}
+
+function guessMime(name = "") {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  const map = {
+    pdf: "application/pdf",
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    txt: "text/plain",
+    json: "application/json",
+    html: "text/html",
+    md: "text/markdown",
+    mp4: "video/mp4",
+    webm: "video/webm",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    ogg: "audio/ogg",
+    csv: "text/csv",
+  };
+  return map[ext] || "application/octet-stream";
+}
+
+async function fetchFileAsBlob(cid, name, onProgress = () => {}) {
+  let total = 0; // unknown by default; we could wire from manifest later
+  const parts = [];
+  let loaded = 0;
+  for await (const chunk of fs.cat(cid)) {
+    parts.push(chunk);
+    loaded += chunk.length || chunk.byteLength || 0;
+    onProgress(loaded, total);
+  }
+  return new Blob(parts, { type: guessMime(name) });
 }
 
 function randId() {
@@ -395,14 +438,62 @@ async function startUI() {
         ].map((i) => i.dataset.cid);
         if (!cids.length) return toast("Select at least one file");
         rooms.requestFiles(roomId, cids).catch(() => {});
+        // --- sketch: CID-level progress ---
+        showFetchProgress(true, 0, cids.length, "Mirroring");
+        let done = 0;
         for (const cid of cids) {
           try {
             for await (const _ of helia.pin.add(cid)) {
+              // yields per block
             }
-          } catch {}
+            done++;
+            showFetchProgress(true, done, cids.length, `Mirrored ${done}/${cids.length}`);
+          } catch {
+            done++;
+            showFetchProgress(true, done, cids.length, `Mirrored ${done}/${cids.length}`);
+          }
         }
+        showFetchProgress(false);
         toast("Requested and mirrored selected files");
       };
+
+    // File open/download actions (event delegation)
+    const filesUl = document.getElementById("room-files");
+    if (filesUl) {
+      filesUl.onclick = async (e) => {
+        const target = e.target.closest("button[data-action]");
+        if (!target) return;
+        const action = target.dataset.action;
+        const cid = target.dataset.cid;
+        const name = target.dataset.name || "file";
+        if (!cid) return;
+        try {
+          showFetchProgress(true, 0, 0, action === "open-file" ? "Opening…" : "Downloading…");
+          const blob = await fetchFileAsBlob(cid, name, (loaded, total) => {
+            showFetchProgress(true, loaded, total, `${loaded} bytes`);
+          });
+          const url = URL.createObjectURL(blob);
+          if (action === "open-file") {
+            window.open(url, "_blank");
+            // best-effort revoke after a while
+            setTimeout(() => URL.revokeObjectURL(url), 60_000);
+          } else if (action === "download-file") {
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = name || cid;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 10_000);
+          }
+        } catch (err) {
+          console.error(err);
+          toast("Failed to fetch file");
+        } finally {
+          showFetchProgress(false);
+        }
+      };
+    }
 
     const input = document.getElementById("chat-input");
     const send = document.getElementById("btn-chat-send");

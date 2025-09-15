@@ -1,3 +1,4 @@
+// @ts-check
 import { ROOM_TOPIC } from "./constants.js";
 import { saveRoom, updateRoomLastSeen } from "./store.js";
 
@@ -7,6 +8,31 @@ function enc(obj) {
 function dec(buf) {
   return JSON.parse(new TextDecoder().decode(buf));
 }
+
+/**
+ * @typedef {Object} FileEntry
+ * @property {string} name
+ * @property {number=} size
+ * @property {string} cid
+ *
+ * @typedef {Object} Manifest
+ * @property {FileEntry[]} files
+ * @property {number=} seq
+ * @property {number=} updatedAt
+ *
+ * @typedef {'HELLO'|'MANIFEST'|'REQUEST'|'ACK'|'CHAT'} RoomMsgType
+ *
+ * @typedef {Object} RoomMessage
+ * @property {RoomMsgType} type
+ * @property {string} roomId
+ * @property {string=} from
+ * @property {string=} text
+ * @property {string[]=} fileCids
+ * @property {Manifest=} manifest
+ * @property {number=} ts
+ * @property {number=} ttl // rebroadcast budget (decremented on forward)
+ * @property {string=} msgId // dedupe id
+ */
 
 export function createRoomManager(helia, fs) {
   const libp2p = helia?.libp2p;
@@ -24,6 +50,31 @@ export function createRoomManager(helia, fs) {
   const outbox = new Map();
   const MAX_BACKOFF_MS = 8000;
   const BASE_MS = 250;
+
+  // message de-dup (recent msgIds)
+  const seenMsg = new Map(); // topic -> LRU Set<string>
+  const SEEN_LIMIT = 400;
+  const rememberSeen = (topic, id) => {
+    let s = seenMsg.get(topic);
+    if (!s) {
+      s = new Set();
+      seenMsg.set(topic, s);
+    }
+    s.add(id);
+    if (s.size > SEEN_LIMIT) {
+      // approx LRU by dropping the first N (iteration order in Set is insertion)
+      const drop = Math.floor(SEEN_LIMIT / 4);
+      let n = 0;
+      for (const v of s) {
+        s.delete(v);
+        if (++n >= drop) break;
+      }
+    }
+  };
+  const isSeen = (topic, id) => {
+    const s = seenMsg.get(topic);
+    return s ? s.has(id) : false;
+  };
 
   const getSubsFor = (topic) => {
     try {
@@ -83,8 +134,27 @@ export function createRoomManager(helia, fs) {
     return false;
   }
 
-  async function publish(roomId, msg, attempt = 0) {
+  /**
+   * Publish with msgId/ttl defaults. If there are no subs yet, enqueue.
+   * @param {string} roomId
+   * @param {RoomMessage} msg
+   */
+  async function publish(roomId, msg) {
     const topic = ROOM_TOPIC(roomId);
+    // normalize metadata
+    if (!msg.msgId) {
+      msg.msgId =
+        (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) +
+        "-" +
+        Date.now().toString(36);
+    }
+    if (typeof msg.ttl !== "number") {
+      // By default make core control messages noisy (1 forward hop).
+      msg.ttl =
+        msg.type === "HELLO" || msg.type === "MANIFEST" || msg.type === "CHAT"
+          ? 1
+          : 0;
+    }
     if (libp2p?.services?.pubsub) {
       // If no known subscribers yet, enqueue + backoff instead of dropping.
       const hasSubs = getSubsFor(topic).length > 0;
@@ -114,12 +184,23 @@ export function createRoomManager(helia, fs) {
     if (topicHandlers.has(roomId)) return;
     const topic = ROOM_TOPIC(roomId);
     if (libp2p?.services?.pubsub) {
+      /** @param {CustomEvent} evt */
       const handler = (evt) => {
         if (evt.detail.topic !== topic) return;
         const fns = subs.get(roomId);
         if (!fns?.size) return;
         try {
+          /** @type {RoomMessage} */
           const m = dec(evt.detail.data);
+          if (!m?.msgId) return;
+          if (isSeen(topic, m.msgId)) return;
+          rememberSeen(topic, m.msgId);
+          // opportunistic one-hop forward (noisy sync)
+          if ((m.ttl ?? 0) > 0) {
+            const fwd = { ...m, ttl: (m.ttl ?? 0) - 1 };
+            // tiny jitter to avoid lockstep
+            setTimeout(() => publish(roomId, fwd).catch(() => {}), 50 + Math.floor(Math.random() * 120));
+          }
           for (const fn of fns) fn(m, evt.detail);
         } catch {}
       };
@@ -136,6 +217,7 @@ export function createRoomManager(helia, fs) {
         const fns = subs.get(roomId);
         if (!fns?.size) return;
         try {
+          /** @type {RoomMessage} */
           const m = dec(ev.data);
           for (const fn of fns) fn(m, { from: "local" });
         } catch {}
@@ -186,11 +268,12 @@ export function createRoomManager(helia, fs) {
       type: "HELLO",
       roomId,
       from: libp2p.peerId.toString(),
+      ttl: 1,
     });
   }
 
   async function sendManifest(roomId, manifest) {
-    await publish(roomId, { type: "MANIFEST", roomId, manifest });
+    await publish(roomId, { type: "MANIFEST", roomId, manifest, ttl: 1 });
   }
 
   async function requestFiles(roomId, fileCids) {
@@ -199,6 +282,7 @@ export function createRoomManager(helia, fs) {
       roomId,
       fileCids,
       from: libp2p.peerId.toString(),
+      ttl: 0, // don't fan this out
     });
   }
 
@@ -209,7 +293,7 @@ export function createRoomManager(helia, fs) {
   async function sendChat(roomId, text) {
     const from = libp2p?.peerId?.toString?.() || "anon";
     // Fire-and-forget; outbox/backoff handles delivery
-    publish(roomId, { type: "CHAT", roomId, text, from, ts: Date.now() }).catch(() => {});
+    publish(roomId, { type: "CHAT", roomId, text, from, ts: Date.now(), ttl: 1 }).catch(() => {});
   }
 
   // If invite included ?host= and ?tracker=, dial the host immediately via the tracker relay.
