@@ -27,7 +27,7 @@ import {
   getChat,
   addChatMessage,
 } from "./store.js";
-import { TRACKERS } from "./constants.js";
+import { TRACKERS, TRACKER_CONTROL, CONTENT_TOPIC } from "./constants.js";
 import { listAddresses, countPeerTypes, peerDetails } from "./peers.js";
 
 const $ = (id) => document.getElementById(id);
@@ -35,6 +35,7 @@ const $ = (id) => document.getElementById(id);
 let helia, fs, libp2p, rooms;
 let activeRoomId = null;
 let chatUnsub = null;
+let roomMsgsUnsub = null;
 
 function urlFlag(name) {
   return new URLSearchParams(location.search).has(name);
@@ -193,8 +194,8 @@ function buildInviteURL(roomId) {
   u.searchParams.set("view", "rooms");
   u.searchParams.set("room", roomId);
   u.searchParams.set("host", helia.libp2p.peerId.toString());
-  if (TRACKERS?.length)
-    u.searchParams.set("tracker", encodeURIComponent(TRACKERS[0]));
+  const tr = (globalThis.wcInviteExtras && globalThis.wcInviteExtras.tracker) || TRACKERS?.[0] || "";
+  if (tr) u.searchParams.set("tracker", encodeURIComponent(tr));
   return u.toString();
 }
 
@@ -218,9 +219,10 @@ async function startUI() {
 
   // expose extras so UI helpers (no direct libp2p import) can add them to URLs
   // todo doublecheck.
+  const sp0 = new URLSearchParams(location.search);
   globalThis.wcInviteExtras = {
     host: libp2p.peerId.toString(),
-    tracker: TRACKERS?.[0] || "",
+    tracker: sp0.get("tracker") ? decodeURIComponent(sp0.get("tracker")) : (TRACKERS?.[0] || ""),
   };
 
   setPeerId(libp2p.peerId.toString());
@@ -358,6 +360,8 @@ async function startUI() {
 
       // Proactively announce files so joiners see them immediately
       rooms.sendManifest(room.id, manifest).catch(() => {});
+      // Ask tracker to subscribe + pin
+      announceToTracker(room.id, manifest).catch(() => {});
 
       lastRoom = room;
       renderDrops(getDrops().slice(0, 5), "drops-list");
@@ -430,32 +434,7 @@ async function startUI() {
   // ---------- Rooms view controller ----------
   function bindRoomButtons(roomId) {
     const roomsInfo = $("rooms-info");
-    const btnReq = document.getElementById("btn-request-files");
-    if (btnReq)
-      btnReq.onclick = async () => {
-        const cids = [
-          ...roomsInfo.querySelectorAll('input[type="checkbox"]:checked'),
-        ].map((i) => i.dataset.cid);
-        if (!cids.length) return toast("Select at least one file");
-        rooms.requestFiles(roomId, cids).catch(() => {});
-        // --- sketch: CID-level progress ---
-        showFetchProgress(true, 0, cids.length, "Mirroring");
-        let done = 0;
-        for (const cid of cids) {
-          try {
-            for await (const _ of helia.pin.add(cid)) {
-              // yields per block
-            }
-            done++;
-            showFetchProgress(true, done, cids.length, `Mirrored ${done}/${cids.length}`);
-          } catch {
-            done++;
-            showFetchProgress(true, done, cids.length, `Mirrored ${done}/${cids.length}`);
-          }
-        }
-        showFetchProgress(false);
-        toast("Requested and mirrored selected files");
-      };
+    // No more "Request & Mirror" intermediary; mirroring occurs automatically on MANIFEST
 
     // File open/download actions (event delegation)
     const filesUl = document.getElementById("room-files");
@@ -502,14 +481,16 @@ async function startUI() {
         const text = input.value.trim();
         if (!text) return;
         // Local echo immediately; network send is fire-and-forget (room outbox handles backoff)
+        const mid = newMsgId();
         addChatMessage(roomId, {
           type: "CHAT",
           roomId,
           text,
           from: libp2p.peerId.toString(),
           ts: Date.now(),
+          msgId: mid,
         });
-        rooms.sendChat(roomId, text).catch(() => {});
+        rooms.sendChat(roomId, text, mid).catch(() => {});
         input.value = "";
         renderChatMessages(getChat(roomId), libp2p.peerId.toString());
       };
@@ -522,85 +503,39 @@ async function startUI() {
       };
     }
 
-    // ---- Add-files-to-room mini component ----
+    // ---- Add-files-to-room (immediate add, no second click) ----
     const rDrop = document.getElementById("room-dropzone");
     const rInput = document.getElementById("room-file-input");
     const rBrowse = document.getElementById("btn-room-browse");
-    const rList = document.getElementById("room-selected-files");
-    const rAdd = document.getElementById("btn-add-to-room");
-    let pendingRoomFiles = [];
-    const renderRoomSel = () => {
-      if (!rList) return;
-      const frag = document.createDocumentFragment();
-      pendingRoomFiles.forEach((f, idx) => {
-        const li = document.createElement("li");
-        li.className = "py-1 flex items-center gap-2";
-        const name = document.createElement("span");
-        name.className = "flex-1 truncate";
-        name.textContent = `${f.name} (${f.size} bytes)`;
-        const rm = document.createElement("button");
-        rm.className = "px-2 py-0.5 text-xs border rounded";
-        rm.textContent = "Remove";
-        rm.onclick = () => {
-          pendingRoomFiles.splice(idx, 1);
-          renderRoomSel();
-        };
-        li.append(name, rm);
-        frag.appendChild(li);
-      });
-      rList.replaceChildren(frag);
-    };
-    const pushFiles = (files) => {
-      const key = (f) => `${f.name}:${f.size}:${f.lastModified ?? 0}`;
-      const seen = new Set(pendingRoomFiles.map(key));
-      for (const f of Array.from(files || [])) {
-        const k = key(f);
-        if (!seen.has(k)) {
-          pendingRoomFiles.push(f);
-          seen.add(k);
-        }
+    async function handleRoomFiles(files) {
+      const arr = Array.from(files || []);
+      if (!arr.length) return;
+      try {
+        const added = await addFilesAndCreateManifest(arr);
+        const cur = getRoom(roomId)?.manifest || { files: [], seq: 0 };
+        const byCid = new Map(cur.files.map((f) => [f.cid, f]));
+        for (const f of added.files) byCid.set(f.cid, f);
+        const merged = { files: [...byCid.values()], seq: Math.max(cur.seq || 0, Date.now()) + 1, updatedAt: Date.now() };
+          saveRoom({ id: roomId, manifest: merged });
+          rooms.sendManifest(roomId, merged).catch(() => {});
+          announceToTracker(roomId, merged).catch(() => {});
+        for (const f of added.files) { try { for await (const _ of helia.pin.add(f.cid)) {} } catch {} }
+        renderRoomsIfActive();
+        toast("Files added to room");
+      } catch (e) {
+        console.error(e);
+        toast("Failed to add files");
       }
-      renderRoomSel();
-    };
+    }
     if (rBrowse && rInput) rBrowse.onclick = () => rInput.click();
-    if (rInput) rInput.onchange = () => pushFiles(rInput.files);
+    if (rInput) rInput.onchange = () => handleRoomFiles(rInput.files);
     if (rDrop) {
       rDrop.ondragover = (e) => { e.preventDefault(); rDrop.classList.add("bg-gray-100"); };
       rDrop.ondragleave = () => rDrop.classList.remove("bg-gray-100");
       rDrop.ondrop = (e) => {
         e.preventDefault();
         rDrop.classList.remove("bg-gray-100");
-        pushFiles(e.dataTransfer.files);
-      };
-    }
-    if (rAdd) {
-      rAdd.onclick = async () => {
-        if (!pendingRoomFiles.length) return toast("Select files first");
-        try {
-          const added = await addFilesAndCreateManifest(pendingRoomFiles);
-          // merge with current manifest
-          const cur = getRoom(roomId)?.manifest || { files: [], seq: 0 };
-          const byCid = new Map(cur.files.map((f) => [f.cid, f]));
-          for (const f of added.files) byCid.set(f.cid, f);
-          const merged = {
-            files: [...byCid.values()],
-            seq: (cur.seq || 0) + 1,
-            updatedAt: Date.now(),
-          };
-          saveRoom({ id: roomId, manifest: merged });
-          rooms.sendManifest(roomId, merged).catch(() => {});
-          // Pin new ones locally too
-          for (const f of added.files) {
-            try { for await (const _ of helia.pin.add(f.cid)) {} } catch {}
-          }
-          pendingRoomFiles = [];
-          renderRoomSel();
-          renderRoomsIfActive();
-          toast("Files added to room");
-        } catch (e) {
-          console.error(e);
-          toast("Failed to add files");
-        }
+        handleRoomFiles(e.dataTransfer.files);
       };
     }
   }
@@ -619,6 +554,41 @@ async function startUI() {
     });
   }
 
+  function subscribeRoomMessages(roomId) {
+    if (roomMsgsUnsub) {
+      roomMsgsUnsub();
+      roomMsgsUnsub = null;
+    }
+    roomMsgsUnsub = rooms.subscribe(roomId, async (msg) => {
+      if (msg?.type !== "MANIFEST" || !msg.manifest) return;
+      const prev = getRoom(roomId)?.manifest || { files: [], seq: 0 };
+      const next = msg.manifest;
+      const prevSet = new Set((prev.files || []).map((f) => f.cid));
+      const nextSet = new Set((next.files || []).map((f) => f.cid));
+      const newCids = [...nextSet].filter((c) => c && !prevSet.has(c));
+      if (newCids.length === 0 && (next.seq || 0) <= (prev.seq || 0)) return;
+      const byCid = new Map([...prev.files, ...next.files].map((f) => [f.cid, f]));
+      const merged = { files: [...byCid.values()], seq: Math.max(prev.seq || 0, next.seq || 0, Date.now()) + 1, updatedAt: Date.now() };
+      saveRoom({ id: roomId, manifest: merged });
+      if (roomId === activeRoomId) {
+        try {
+          const r = getRoom(roomId);
+          renderRoomDetails(r);
+          bindRoomButtons(roomId);
+        } catch {}
+      }
+      if (!newCids.length) return;
+      showFetchProgress(true, 0, newCids.length, `Syncing 0/${newCids.length}`);
+      let done = 0;
+      for (const cid of newCids) {
+        try { for await (const _ of helia.pin.add(cid)) {} } catch {}
+        done++;
+        showFetchProgress(true, done, newCids.length, `Syncing ${done}/${newCids.length}`);
+      }
+      showFetchProgress(false);
+    });
+  }
+
   function renderRoomsIfActive() {
     if (currentView() !== "rooms") return;
     // rooms list
@@ -633,12 +603,17 @@ async function startUI() {
     const rid = sp.get("room");
     if (!rid) return;
     activeRoomId = rid;
-    const room = getRoom(rid);
+    let room = getRoom(rid);
+    if (!room) {
+      saveRoom({ id: rid, name: `Room ${rid.slice(0, 6)}`, createdAt: Date.now() });
+      room = getRoom(rid);
+    }
     if (room?.manifest) {
       renderRoomDetails(room);
       renderChatMessages(getChat(rid), libp2p.peerId.toString());
       bindRoomButtons(rid);
       subscribeChat(rid);
+      subscribeRoomMessages(rid);
     } else {
       // request manifest by sending HELLO if not yet known
       rooms.attachJoin(rid, (manifest) => {
@@ -652,6 +627,7 @@ async function startUI() {
       });
       bindRoomButtons(rid);
       subscribeChat(rid);
+      subscribeRoomMessages(rid);
     }
   }
 
@@ -661,7 +637,37 @@ async function startUI() {
   });
 }
 
+// ------- Small helpers for file open/download + progress -------
+function newMsgId() {
+  return (
+    (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)) +
+    "-" +
+    Date.now().toString(36)
+  );
+}
+
 startUI().catch((e) => {
   console.error(e);
   toast("Failed to start Helia/libp2p");
 });
+// lightweight enc helper for tracker control
+function enc(obj) { return new TextEncoder().encode(JSON.stringify(obj)); }
+
+async function announceToTracker(roomId, manifest) {
+  try {
+    const cids = (manifest?.files || []).map((f) => f.cid).filter(Boolean);
+    if (!cids.length) return;
+    // Control announce (optional)
+    await libp2p.services.pubsub.publish(TRACKER_CONTROL, enc({
+      type: "TRACKER_ANNOUNCE",
+      roomId,
+      fileCids: cids,
+      host: libp2p.peerId.toString(),
+      ts: Date.now(),
+    }));
+    // Content pin announce (server/newtracker extracts CIDs from JSON)
+    await libp2p.services.pubsub.publish(CONTENT_TOPIC, enc({ roomId, cids }));
+  } catch (e) {
+    console.warn("tracker announce failed", e?.message);
+  }
+}

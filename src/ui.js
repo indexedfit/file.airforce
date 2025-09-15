@@ -174,10 +174,9 @@ export function renderRoomDetails(room, opts = {}) {
         <ul id="room-files" class="space-y-1">${files
           .map(
             (f) => `
-          <li class=\"flex items-center gap-2\">\n            <input type=\"checkbox\" data-cid=\"${f.cid}\" checked/>\n            <span class=\"flex-1 truncate\">${f.name}</span>\n            <span class=\"text-xs text-gray-500\">${f.size ?? ""} ${f.size ? "bytes" : ""}</span>\n            <button data-action=\"open-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-0.5 border rounded text-xs\">Open</button>\n            <button data-action=\"download-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-0.5 border rounded text-xs\">Download</button>\n          </li>`
+          <li class=\"flex items-center gap-2\">\n            <span class=\"flex-1 truncate\">${f.name}</span>\n            <span class=\"text-xs text-gray-500\">${f.size ?? ""} ${f.size ? "bytes" : ""}</span>\n            <button data-action=\"open-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-0.5 border rounded text-xs\">Open</button>\n            <button data-action=\"download-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-0.5 border rounded text-xs\">Download</button>\n          </li>`
           )
           .join("")}</ul>
-        <button id="btn-request-files" class="mt-2 px-2 py-1 border rounded">Request & Mirror</button>
 
         <div class="mt-4 p-3 bg-gray-50 border rounded">
           <div class="font-medium mb-1">Add files to this room</div>
@@ -185,8 +184,6 @@ export function renderRoomDetails(room, opts = {}) {
             <input id="room-file-input" type="file" multiple class="hidden"/>
             <p>Drag & drop, or <button type="button" id="btn-room-browse" class="underline">browse</button></p>
           </div>
-          <ul id="room-selected-files" class="mt-2 text-sm divide-y"></ul>
-          <button id="btn-add-to-room" class="mt-2 px-2 py-1 border rounded">Add Selected</button>
         </div>
       </div>
       <div>

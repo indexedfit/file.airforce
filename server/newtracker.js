@@ -39,7 +39,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { PUBSUB_PEER_DISCOVERY, ROOM_TOPIC } from './constants.js'
+import { PUBSUB_PEER_DISCOVERY, ROOM_TOPIC, TRACKER_CONTROL } from './constants.js'
 
 // ---------- config via env (with sane defaults) ----------
 // Polyfill CustomEvent for Node < 19
@@ -212,6 +212,7 @@ async function main() {
 
   // subscribe & mirror
   libp2p.services.pubsub.subscribe(CONTENT_TOPIC)
+  libp2p.services.pubsub.subscribe(TRACKER_CONTROL)
   libp2p.services.pubsub.subscribe(PUBSUB_PEER_DISCOVERY)
   if (DISCOVERY_TOPIC) libp2p.services.pubsub.subscribe(DISCOVERY_TOPIC)
   for (const rid of ROOM_IDS) {
@@ -225,6 +226,24 @@ async function main() {
     let cids = []
     if (topic === CONTENT_TOPIC) {
       cids = extractCids(data ?? new Uint8Array())
+    }
+
+    // Flow A2: tracker control – subscribe to per-room topics and optionally pin
+    if (topic === TRACKER_CONTROL) {
+      try {
+        const msg = JSON.parse(u8ToString(data || new Uint8Array()))
+        if (msg?.type === 'TRACKER_ANNOUNCE' && msg?.roomId) {
+          const roomTopic = ROOM_TOPIC(msg.roomId)
+          if (!libp2p.services.pubsub.getTopics().includes(roomTopic)) {
+            libp2p.services.pubsub.subscribe(roomTopic)
+            console.log('[tracker] subscribed to room', msg.roomId)
+          }
+          // Optional: also pin any cids carried in the message
+          if (Array.isArray(msg.fileCids)) {
+            cids = msg.fileCids.map((s) => CID.parse(String(s)))
+          }
+        }
+      } catch { }
     }
 
     // Flow B: room REQUEST messages – pin requested fileCids

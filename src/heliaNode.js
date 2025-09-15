@@ -38,27 +38,19 @@ export async function startHelia() {
     // Reserve on discovered relays so others can dial us via /p2p-circuit
     transports: [webSockets(), webTransport(), webRTC(), circuitRelayTransport({ discoverRelays: 2 })],
     connectionEncrypters: [noise()],
-    // Be a bit more eager: helps first-hop bootstrap & bitswap pathing
-    connectionManager: { minConnections: 4, maxConnections: 16, autoDial: true },
+    // Balanced defaults
+    connectionManager: { maxConnections: 29, autoDial: true },
     streamMuxers: [yamux()],
     connectionGater: {
       denyDialMultiaddr: async () => false,
     },
     peerDiscovery: [
       bootstrap({ list: TRACKERS_ACTIVE }),
-      pubsubPeerDiscovery({
-        interval: 3_000, // more eager
-        topics: [PUBSUB_PEER_DISCOVERY],
-      }),
+      pubsubPeerDiscovery({ interval: 3_000, topics: [PUBSUB_PEER_DISCOVERY] }),
     ],
     services: {
-      // No-throw publish while the mesh is still forming + faster heartbeats
-      pubsub: gossipsub({
-        allowPublishToZeroPeers: true,
-        // modestly faster heartbeats to mend meshes quicker (defaults ~1s)
-        // not too low (battery):
-        heartbeatInterval: 800,
-      }),
+      // No-throw publish while the mesh is still forming
+      pubsub: gossipsub({ allowPublishToZeroPeers: true }),
       identify: identify(),
     },
   });

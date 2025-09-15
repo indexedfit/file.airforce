@@ -149,11 +149,8 @@ export function createRoomManager(helia, fs) {
         Date.now().toString(36);
     }
     if (typeof msg.ttl !== "number") {
-      // By default make core control messages noisy (1 forward hop).
-      msg.ttl =
-        msg.type === "HELLO" || msg.type === "MANIFEST" || msg.type === "CHAT"
-          ? 1
-          : 0;
+      // Disable application-level rebroadcast by default; pubsub handles propagation.
+      msg.ttl = 0;
     }
     if (libp2p?.services?.pubsub) {
       // If no known subscribers yet, enqueue + backoff instead of dropping.
@@ -195,12 +192,6 @@ export function createRoomManager(helia, fs) {
           if (!m?.msgId) return;
           if (isSeen(topic, m.msgId)) return;
           rememberSeen(topic, m.msgId);
-          // opportunistic one-hop forward (noisy sync)
-          if ((m.ttl ?? 0) > 0) {
-            const fwd = { ...m, ttl: (m.ttl ?? 0) - 1 };
-            // tiny jitter to avoid lockstep
-            setTimeout(() => publish(roomId, fwd).catch(() => {}), 50 + Math.floor(Math.random() * 120));
-          }
           for (const fn of fns) fn(m, evt.detail);
         } catch {}
       };
@@ -268,12 +259,11 @@ export function createRoomManager(helia, fs) {
       type: "HELLO",
       roomId,
       from: libp2p.peerId.toString(),
-      ttl: 1,
     });
   }
 
   async function sendManifest(roomId, manifest) {
-    await publish(roomId, { type: "MANIFEST", roomId, manifest, ttl: 1 });
+    await publish(roomId, { type: "MANIFEST", roomId, manifest });
   }
 
   async function requestFiles(roomId, fileCids) {
@@ -290,10 +280,10 @@ export function createRoomManager(helia, fs) {
     await publish(roomId, { type: "ACK", roomId, info });
   }
 
-  async function sendChat(roomId, text) {
+  async function sendChat(roomId, text, msgId) {
     const from = libp2p?.peerId?.toString?.() || "anon";
     // Fire-and-forget; outbox/backoff handles delivery
-    publish(roomId, { type: "CHAT", roomId, text, from, ts: Date.now(), ttl: 1 }).catch(() => {});
+    publish(roomId, { type: "CHAT", roomId, text, from, ts: Date.now(), ttl: 0, msgId }).catch(() => {});
   }
 
   // If invite included ?host= and ?tracker=, dial the host immediately via the tracker relay.
@@ -327,19 +317,15 @@ export function createRoomManager(helia, fs) {
           }
           await sendAck(roomId, { ok: true, pinned: msg.fileCids.length });
           break;
-        case "MANIFEST":
-          // peers may rehost and announce updates; persist
-          if (msg.manifest) saveRoom({ id: roomId, manifest: msg.manifest });
-          break;
       }
     });
-    // Proactively (re)announce manifest a few times to beat mesh race.
+    // Briefly re-announce manifest to beat mesh race (low count to avoid chatter).
     let bursts = 0;
     const t = setInterval(() => {
       bursts++;
       sendManifest(roomId, manifest).catch(() => {});
-      if (bursts >= 5) clearInterval(t);
-    }, 600 + Math.floor(Math.random() * 250));
+      if (bursts >= 2) clearInterval(t);
+    }, 900 + Math.floor(Math.random() * 250));
   }
 
   function attachJoin(roomId, onManifest) {
@@ -350,22 +336,8 @@ export function createRoomManager(helia, fs) {
       updateRoomLastSeen(roomId);
       if (msg.type === "MANIFEST" && msg.manifest) {
         gotManifest = true;
-        // persist and bubble to UI
-        saveRoom({ id: roomId, manifest: msg.manifest });
+        // Bubble to UI; store persistence handled upstream
         onManifest(msg.manifest);
-        // Auto-request + mirror all files immediately so CIDs start flowing.
-        const cids = (msg.manifest.files || [])
-          .map((f) => f.cid)
-          .filter(Boolean);
-        if (cids.length) {
-          requestFiles(roomId, cids).catch(() => {});
-          for (const cid of cids) {
-            try {
-              for await (const _ of helia.pin.add(cid)) {
-              }
-            } catch {}
-          }
-        }
       }
     });
     // Retry HELLO with backoff until we see a MANIFEST (bounded).
