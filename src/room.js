@@ -92,12 +92,6 @@ export function createRoomManager(helia, fs) {
       Math.floor(Math.random() * 200);
     entry.timer = setTimeout(async () => {
       entry.timer = null;
-      const hasSubs = getSubsFor(topic).length > 0;
-      if (!hasSubs) {
-        entry.attempts = Math.min((entry.attempts || 0) + 1, 8);
-        scheduleFlush(topic);
-        return;
-      }
       // Flush all queued messages in order
       while (entry.queue.length) {
         const msg = entry.queue.shift();
@@ -153,9 +147,10 @@ export function createRoomManager(helia, fs) {
       msg.ttl = 0;
     }
     if (libp2p?.services?.pubsub) {
-      // If no known subscribers yet, enqueue + backoff instead of dropping.
-      const hasSubs = getSubsFor(topic).length > 0;
-      if (!hasSubs) {
+      try {
+        await libp2p.services.pubsub.publish(topic, enc(msg));
+      } catch {
+        // enqueue + backoff if publish throws
         let entry = outbox.get(topic);
         if (!entry) {
           entry = { queue: [], attempts: 0, timer: null };
@@ -163,10 +158,7 @@ export function createRoomManager(helia, fs) {
         }
         entry.queue.push(msg);
         scheduleFlush(topic);
-        return;
       }
-      // We have subs: just publish.
-      await libp2p.services.pubsub.publish(topic, enc(msg));
     } else {
       let bc = bcMap.get(topic);
       if (!bc) {
@@ -319,13 +311,16 @@ export function createRoomManager(helia, fs) {
           break;
       }
     });
-    // Briefly re-announce manifest to beat mesh race (low count to avoid chatter).
+    // Re-announce manifest a few times with mild exponential backoff
     let bursts = 0;
-    const t = setInterval(() => {
+    const rebroadcast = async () => {
+      if (bursts >= 4) return;
       bursts++;
       sendManifest(roomId, manifest).catch(() => {});
-      if (bursts >= 2) clearInterval(t);
-    }, 900 + Math.floor(Math.random() * 250));
+      const delay = Math.min(600 * Math.pow(1.5, bursts), 4000) + Math.floor(Math.random() * 200);
+      setTimeout(rebroadcast, delay);
+    };
+    setTimeout(rebroadcast, 600 + Math.floor(Math.random() * 200));
   }
 
   function attachJoin(roomId, onManifest) {

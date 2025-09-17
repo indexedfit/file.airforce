@@ -28,6 +28,7 @@ if (enableWebTransport) ({ webTransport } = await import('@libp2p/webtransport')
 import { createDelegatedRoutingV1HttpApiClient } from '@helia/delegated-routing-v1-http-api-client'
 
 import { createHelia } from 'helia'
+import { unixfs } from '@helia/unixfs'
 import { FsBlockstore } from 'blockstore-fs'
 import { LevelDatastore } from 'datastore-level'
 import { CID } from 'multiformats/cid'
@@ -119,7 +120,8 @@ function extractCids(bytes) {
   return [...out].map(s => CID.parse(s))
 }
 
-async function consume(asyncIt) { for await (const _ of asyncIt) { } }
+// Consume an async iterable to completion (used for pin progress streams)
+async function consume(asyncIt) { for await (const _ of asyncIt) {} }
 
 async function main() {
   // ---------- libp2p ----------
@@ -131,9 +133,24 @@ async function main() {
         LISTEN_TCP,
         ...(LISTEN_WT ? [LISTEN_WT] : []),
         ...(LISTEN_WEBRTC ? [LISTEN_WEBRTC] : [])
-      ].filter(Boolean)
+      ].filter(Boolean),
+      // Allow explicit external addresses for production (e.g. /dns4/relay.example.com/tcp/443/wss)
+      announce: (() => {
+        const manual = (process.env.ANNOUNCE_ADDRS || '')
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean)
+        const out = new Set(manual)
+        const host = process.env.PUBLIC_HOST
+        if (host) {
+          const port = process.env.PUBLIC_PORT ? Number(process.env.PUBLIC_PORT) : 443
+          out.add(`/dns4/${host}/tcp/${port}/wss`)
+        }
+        return [...out]
+      })()
     },
     transports: [
+      // WebSockets transport is enabled; terminate TLS at a reverse proxy for WSS
       webSockets(),
       tcp(),
       ...(enableWebTransport ? [webTransport()] : []),
@@ -174,13 +191,16 @@ async function main() {
     datastore
     // Helia will use libp2p routing (DHT or delegated) under the hood
   })
+  const fs = unixfs(helia)
 
   // ---------- mirror state ----------
-  const seen = new Set()   // seen CIDs
-  const pinned = new Set() // pinned CIDs
+  const seen = new Set()   // seen CIDs (for UI only)
+  const pinned = new Set() // successfully pinned CIDs
+  const inProgress = new Set() // CIDs currently pinning
   const pubs = new Map()   // peerId -> {count,lastCid}
   let latestConn = null
   let pinInFlight = 0
+  const MIRROR_ENABLED = process.env.MIRROR_ENABLED !== '0'
 
   function render() {
     const addrs = libp2p.getMultiaddrs().map(a => a.toString())
@@ -258,7 +278,7 @@ async function main() {
       } catch { }
     }
 
-    if (cids.length === 0) return
+    if (!MIRROR_ENABLED || cids.length === 0) return
 
     const key = from?.toString?.() || 'unknown'
     const cur = pubs.get(key) ?? { count: 0, lastCid: '' }
@@ -268,14 +288,33 @@ async function main() {
 
     for (const cid of cids) {
       const s = cid.toString()
-      if (pinned.has(s) || seen.has(s)) continue
-      seen.add(s)
+      if (pinned.has(s) || inProgress.has(s)) continue
+      seen.add(s) // track visibility regardless of outcome
+      inProgress.add(s)
 
         ; (async () => {
           while (pinInFlight >= PIN_CONCURRENCY) await sleep(50)
           pinInFlight++
           try {
-            // Helia's pin API is helia.pin.add (yields progress)
+            // 1) Ensure blocks are present by retrieving content
+            try {
+              const st = await fs.stat(cid).catch(() => null)
+              if (st?.type === 'file') {
+                for await (const _ of fs.cat(cid)) { /* drain */ }
+              } else if (st?.type === 'directory') {
+                for await (const entry of fs.ls(cid, { recursive: true })) {
+                  if (entry.type === 'file') {
+                    for await (const _ of fs.cat(entry.cid)) { /* drain */ }
+                  }
+                }
+              } else {
+                // fallback: try cat; if it throws, we'll still attempt pin
+                for await (const _ of fs.cat(cid)) { /* drain */ }
+              }
+            } catch (e) {
+              // retrieval may fail if the publisher is offline; continue to pin attempt anyway
+            }
+            // 2) Pin recursively now that blocks are (likely) present
             await consume(helia.pin.add(cid, { recursive: true }))
             pinned.add(s)
 
@@ -287,6 +326,7 @@ async function main() {
             console.warn('[mirror] pin failed', s, e?.message)
           } finally {
             pinInFlight--
+            inProgress.delete(s)
           }
         })().catch(() => { })
     }

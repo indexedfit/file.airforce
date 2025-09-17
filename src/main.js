@@ -64,7 +64,7 @@ async function startHeliaMaybeFake() {
       },
     };
     // Pin API shim
-    fake.pin = { add: async function* () {} };
+    fake.pin = { add: async function* () { } };
     return { helia: fake, fs: fakeFs, libp2p: fake.libp2p };
   }
   return startHelia();
@@ -121,7 +121,7 @@ function guessMime(name = "") {
   return map[ext] || "application/octet-stream";
 }
 
-async function fetchFileAsBlob(cid, name, onProgress = () => {}) {
+async function fetchFileAsBlob(cid, name, onProgress = () => { }) {
   let total = 0; // unknown by default; we could wire from manifest later
   const parts = [];
   let loaded = 0;
@@ -230,7 +230,7 @@ async function startUI() {
   try {
     libp2p.services?.pubsub?.subscribe?.(CONTENT_TOPIC);
     libp2p.services?.pubsub?.subscribe?.(TRACKER_CONTROL);
-  } catch {}
+  } catch { }
   setInterval(() => {
     setConnCount(libp2p.getConnections().length);
     renderAddresses(listAddresses(libp2p));
@@ -262,7 +262,6 @@ async function startUI() {
   const fileInput = $("file-input");
   const browse = $("btn-browse");
   const createRoomBtn = $("btn-create-room");
-  const inviteBtn = $("btn-invite");
 
   // Keep selected files in state; don't assign to input.files (read-only in many browsers)
   let selectedFiles = [];
@@ -354,7 +353,7 @@ async function startUI() {
         try {
           for await (const _ of helia.pin.add(f.cid)) {
           }
-        } catch {}
+        } catch { }
       }
       const room = {
         id: randId(),
@@ -368,9 +367,9 @@ async function startUI() {
       rooms.attachHost(room);
 
       // Proactively announce files so joiners see them immediately
-      rooms.sendManifest(room.id, manifest).catch(() => {});
+      rooms.sendManifest(room.id, manifest).catch(() => { });
       // Ask tracker to subscribe + pin
-      announceToTracker(room.id, manifest).catch(() => {});
+      announceToTracker(room.id, manifest).catch(() => { });
 
       lastRoom = room;
       renderDrops(getDrops().slice(0, 5), "drops-list");
@@ -395,50 +394,48 @@ async function startUI() {
     }
   }
 
-  createRoomBtn.onclick = async () => {
-    if (!selectedFiles.length) {
-      toast("Select files first");
-      return;
-    }
-    await autoCreateDropAndRoom();
-  };
+  if (createRoomBtn) {
+    createRoomBtn.onclick = async () => {
+      if (!selectedFiles.length) {
+        toast("Select files first");
+        return;
+      }
+      await autoCreateDropAndRoom();
+    };
+  }
 
-  inviteBtn.onclick = async () => {
-    if (!lastRoom) {
-      toast("Create a drop/room first");
-      return;
-    }
-    const link = buildInviteURL(lastRoom.id);
-    showInvite(link);
-  };
 
   renderDrops(getDrops().slice(0, 5), "drops-list");
   renderDrops(getDrops(), "drops-list-full");
 
-  $("btn-join-room").onclick = async () => {
-    const input = $("join-room-id").value.trim();
-    if (!input) return;
-    let roomId = input;
-    try {
-      const u = new URL(input);
-      roomId = u.searchParams.get("room") || input;
-    } catch {}
-    const existing = getRoom(roomId);
-    if (!existing)
-      saveRoom({
-        id: roomId,
-        name: `Room ${roomId.slice(0, 6)}`,
-        createdAt: Date.now(),
+  const joinBtn = $("btn-join-room");
+  if (joinBtn) {
+    joinBtn.onclick = async () => {
+      const inputEl = $("join-room-id");
+      const input = (inputEl?.value || "").trim();
+      if (!input) return;
+      let roomId = input;
+      try {
+        const u = new URL(input);
+        roomId = u.searchParams.get("room") || input;
+      } catch { }
+      const existing = getRoom(roomId);
+      if (!existing)
+        saveRoom({
+          id: roomId,
+          name: `Room ${roomId.slice(0, 6)}`,
+          createdAt: Date.now(),
+        });
+      rooms.attachJoin(roomId, (manifest) => {
+        saveRoom({ id: roomId, manifest });
+        renderRoomsIfActive();
       });
-    rooms.attachJoin(roomId, (manifest) => {
-      saveRoom({ id: roomId, manifest });
+      goto("rooms", { room: roomId });
+      activeRoomId = roomId;
       renderRoomsIfActive();
-    });
-    goto("rooms", { room: roomId });
-    activeRoomId = roomId;
-    renderRoomsIfActive();
-    toast(`Joined room ${roomId}`);
-  };
+      toast(`Joined room ${roomId}`);
+    };
+  }
 
   // ---------- Rooms view controller ----------
   function bindRoomButtons(roomId) {
@@ -450,7 +447,14 @@ async function startUI() {
     if (filesUl) {
       filesUl.onclick = async (e) => {
         const target = e.target.closest("button[data-action]");
-        if (!target) return;
+        if (!target) {
+          // plain click -> selection
+          const li = e.target.closest('li[data-idx]')
+          if (!li) return;
+          filesUl.querySelectorAll('li').forEach(n => n.classList.remove('is-selected'))
+          li.classList.add('is-selected')
+          return;
+        }
         const action = target.dataset.action;
         const cid = target.dataset.cid;
         const name = target.dataset.name || "file";
@@ -463,7 +467,6 @@ async function startUI() {
           const url = URL.createObjectURL(blob);
           if (action === "open-file") {
             window.open(url, "_blank");
-            // best-effort revoke after a while
             setTimeout(() => URL.revokeObjectURL(url), 60_000);
           } else if (action === "download-file") {
             const a = document.createElement("a");
@@ -481,6 +484,37 @@ async function startUI() {
           showFetchProgress(false);
         }
       };
+      filesUl.ondblclick = () => {
+        const li = filesUl.querySelector('li.is-selected') || filesUl.querySelector('li[data-idx="0"]')
+        if (!li) return;
+        const btn = li.querySelector('button[data-action="open-file"]')
+        btn?.click()
+      }
+      filesUl.onkeydown = (e) => {
+        const tag = (e.target?.tagName || '').toLowerCase()
+        if (tag === 'input' || tag === 'textarea') return;
+        if (!['ArrowDown','ArrowUp','Enter'].includes(e.key)) return;
+        e.preventDefault()
+        const items = Array.from(filesUl.querySelectorAll('li[data-idx]'))
+        if (!items.length) return;
+        let idx = items.findIndex(n => n.classList.contains('is-selected'))
+        if (idx < 0) idx = 0
+        if (e.key === 'ArrowDown') idx = Math.min(items.length - 1, idx + 1)
+        if (e.key === 'ArrowUp') idx = Math.max(0, idx - 1)
+        items.forEach(n => n.classList.remove('is-selected'))
+        const sel = items[idx]
+        sel.classList.add('is-selected')
+        sel.focus()
+        if (e.key === 'Enter') {
+          const btn = sel.querySelector('button[data-action="open-file"]')
+          btn?.click()
+        }
+      }
+      // initialize selection
+      queueMicrotask(() => {
+        const first = filesUl.querySelector('li[data-idx="0"]')
+        if (first) first.classList.add('is-selected')
+      })
     }
 
     const input = document.getElementById("chat-input");
@@ -499,7 +533,7 @@ async function startUI() {
           ts: Date.now(),
           msgId: mid,
         });
-        rooms.sendChat(roomId, text, mid).catch(() => {});
+        rooms.sendChat(roomId, text, mid).catch(() => { });
         input.value = "";
         renderChatMessages(getChat(roomId), libp2p.peerId.toString());
       };
@@ -508,6 +542,20 @@ async function startUI() {
         if (e.key === "Enter") {
           e.preventDefault();
           sendNow();
+        }
+      };
+    }
+
+    // Room-level copy link button
+    const copyBtn = document.getElementById("btn-copy-room-link");
+    if (copyBtn) {
+      copyBtn.onclick = () => {
+        try {
+          const link = buildInviteURL(roomId);
+          navigator.clipboard.writeText(link).then(() => toast("Link copied"));
+        } catch (e) {
+          console.error(e);
+          toast("Failed to copy link");
         }
       };
     }
@@ -525,10 +573,10 @@ async function startUI() {
         const byCid = new Map(cur.files.map((f) => [f.cid, f]));
         for (const f of added.files) byCid.set(f.cid, f);
         const merged = { files: [...byCid.values()], seq: Math.max(cur.seq || 0, Date.now()) + 1, updatedAt: Date.now() };
-          saveRoom({ id: roomId, manifest: merged });
-          rooms.sendManifest(roomId, merged).catch(() => {});
-          announceToTracker(roomId, merged).catch(() => {});
-        for (const f of added.files) { try { for await (const _ of helia.pin.add(f.cid)) {} } catch {} }
+        saveRoom({ id: roomId, manifest: merged });
+        rooms.sendManifest(roomId, merged).catch(() => { });
+        announceToTracker(roomId, merged).catch(() => { });
+        for (const f of added.files) { try { for await (const _ of helia.pin.add(f.cid)) { } } catch { } }
         renderRoomsIfActive();
         toast("Files added to room");
       } catch (e) {
@@ -583,14 +631,16 @@ async function startUI() {
         try {
           const r = getRoom(roomId);
           renderRoomDetails(r);
+          // Re-render chat after DOM replacement so it doesn't appear blank
+          renderChatMessages(getChat(roomId), libp2p.peerId.toString());
           bindRoomButtons(roomId);
-        } catch {}
+        } catch { }
       }
       if (!newCids.length) return;
       showFetchProgress(true, 0, newCids.length, `Syncing 0/${newCids.length}`);
       let done = 0;
       for (const cid of newCids) {
-        try { for await (const _ of helia.pin.add(cid)) {} } catch {}
+        try { for await (const _ of helia.pin.add(cid)) { } } catch { }
         done++;
         showFetchProgress(true, done, newCids.length, `Syncing ${done}/${newCids.length}`);
       }
@@ -607,6 +657,7 @@ async function startUI() {
       activeRoomId = r.id;
       renderRoomsIfActive();
     });
+    // Removed keyboard navigation/selection for rooms panel per request
     // active room
     const sp = new URLSearchParams(location.search);
     const rid = sp.get("room");

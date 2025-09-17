@@ -159,9 +159,12 @@ export function renderRoomDetails(room, opts = {}) {
   const files = room?.manifest?.files || [];
   root.innerHTML = `
     <div class="mb-3">
-      <div class="font-semibold">${
-        room?.name || "(room)"
-      } <span class="text-xs text-gray-500">${room?.id || ""}</span></div>
+      <div class="flex items-center gap-2">
+        <div class="font-semibold">${
+          room?.name || "(room)"
+        } <span class="text-xs text-gray-500">${room?.id || ""}</span></div>
+        <button id="btn-copy-room-link" class="ml-auto px-2 py-1 border rounded text-xs">Copy link</button>
+      </div>
     </div>
     <div class="grid md:grid-cols-2 gap-4">
       <div>
@@ -173,8 +176,8 @@ export function renderRoomDetails(room, opts = {}) {
         }
         <ul id="room-files" class="space-y-1">${files
           .map(
-            (f) => `
-          <li class=\"flex items-center gap-2\">\n            <span class=\"flex-1 truncate\">${f.name}</span>\n            <span class=\"text-xs text-gray-500\">${f.size ?? ""} ${f.size ? "bytes" : ""}</span>\n            <button data-action=\"open-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-0.5 border rounded text-xs\">Open</button>\n            <button data-action=\"download-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-0.5 border rounded text-xs\">Download</button>\n          </li>`
+            (f, idx) => `
+          <li class=\"flex items-center gap-2 cursor-pointer no-outline\" data-idx=\"${idx}\" tabindex=\"0\">\n            <span class=\"flex-1 truncate\">${f.name}</span>\n            <span class=\"text-xs text-gray-500\">${f.size ?? ""} ${f.size ? "bytes" : ""}</span>\n            <button data-action=\"open-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-0.5 border rounded text-xs\">Open</button>\n            <button data-action=\"download-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-0.5 border rounded text-xs\">Download</button>\n          </li>`
           )
           .join("")}</ul>
 

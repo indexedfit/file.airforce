@@ -3,68 +3,54 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>web.cleaning</title>
+  <title>file.airforce</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script type="module" defer src="./main.js"></script>
   <style>
     [hidden] { display: none !important; }
     .snap-scroll { scroll-behavior: smooth }
     .truncate-mid { max-width: 100%; overflow: hidden; text-overflow: ellipsis }
+    .is-selected { outline: 2px solid #2563eb; background-color: #eff6ff; }
+    .no-outline:focus { outline: none; }
   </style>
   </head>
 <body class="bg-gray-50 text-gray-900">
   <header class="bg-white sticky top-0 z-20 border-b">
     <div class="container mx-auto px-4 py-3 flex items-center gap-3">
-      <h1 class="font-bold text-xl">web.cleaning</h1>
-      <nav class="ml-auto text-sm flex gap-2">
-        <a href="/" data-link class="px-2 py-1 rounded hover:bg-gray-100">Home</a>
-        <a href="?view=drops" data-link class="px-2 py-1 rounded hover:bg-gray-100">Drops</a>
-        <a href="?view=rooms" data-link class="px-2 py-1 rounded hover:bg-gray-100">Rooms</a>
-        <a href="?view=peers" data-link class="px-2 py-1 rounded hover:bg-gray-100">Peers</a>
-      </nav>
+      <a href="/" data-link class="font-bold text-xl">file.airforce</a>
+      <div class="ml-auto text-sm flex items-center gap-3">
+        <div class="flex items-baseline gap-1">
+          <span id="conn-count" class="font-semibold">0</span>
+          <span class="text-xs text-gray-500">peers</span>
+        </div>
+        <button id="peer-info-toggle" class="px-2 py-1 border rounded text-xs">Details</button>
+      </div>
+    </div>
+    <div id="peer-info-panel" class="hidden border-t">
+      <div class="container mx-auto px-4 py-3">
+        <div class="grid md:grid-cols-3 gap-3">
+          <div>
+            <div class="text-xs text-gray-500">Peer ID</div>
+            <div id="peer-id" class="font-mono text-xs break-all select-all">—</div>
+          </div>
+          <div class="md:col-span-2">
+            <div class="text-xs text-gray-500">Addresses</div>
+            <ul id="addr-list" class="text-xs space-y-1 max-h-24 overflow-auto"></ul>
+          </div>
+        </div>
+      </div>
     </div>
   </header>
 
   <main class="container mx-auto px-4 py-6 snap-scroll">
-    <section class="mb-4 grid grid-cols-1 md:grid-cols-3 gap-3">
-      <div class="bg-white border rounded p-3 md:col-span-3">
-        <div class="flex items-center gap-3">
-          <div class="mr-4">
-            <div class="text-xs text-gray-500">Connections</div>
-            <div class="flex items-baseline gap-2">
-              <span id="conn-count" class="text-lg font-semibold">0</span>
-              <span class="text-xs text-gray-500">peers</span>
-            </div>
-          </div>
-          <button id="peer-info-toggle" class="px-2 py-1 border rounded text-xs">Details</button>
-        </div>
-        <div id="peer-info-panel" class="mt-3 hidden">
-          <div class="grid md:grid-cols-3 gap-3">
-            <div>
-              <div class="text-xs text-gray-500">Peer ID</div>
-              <div id="peer-id" class="font-mono text-xs break-all select-all">—</div>
-            </div>
-            <div class="md:col-span-2">
-              <div class="text-xs text-gray-500">Addresses</div>
-              <ul id="addr-list" class="text-xs space-y-1 max-h-24 overflow-auto"></ul>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
+    <!-- connection summary moved to header -->
 
     <!-- Home -->
     <section id="view-home">
       <div class="bg-white border rounded p-4">
         <h2 class="font-semibold mb-3">Create a drop</h2>
         <form id="upload-form" class="space-y-3">
-          <div class="flex items-center gap-2">
-            <input id="drop-name" type="text" placeholder="Name this drop (optional)"
-                   class="w-full border rounded px-3 py-2"/>
-            <button id="btn-create-room" type="button"
-                    class="px-3 py-2 border rounded hover:bg-gray-50"
-                    title="Create a room for this drop (invite friends)">Make Room</button>
-          </div>
+          <!-- removed: optional drop name + Make Room button (auto-creates) -->
 
           <div id="dropzone"
                class="border-2 border-dashed rounded p-6 text-center text-sm text-gray-500 bg-gray-50 hover:bg-white">
@@ -126,15 +112,7 @@
         <div id="rooms-info" class="text-sm text-gray-600"></div>
         <ul id="rooms-list" class="mt-2 divide-y"></ul>
       </div>
-      <div class="mt-6 bg-white border rounded p-4">
-        <h3 class="font-semibold">Join a room</h3>
-        <div class="flex items-center gap-2">
-          <input id="join-room-id" class="border rounded px-3 py-2 flex-1"
-                 placeholder="Paste a room link or room ID"/>
-          <button id="btn-join-room" class="px-3 py-2 border rounded hover:bg-gray-50">Join</button>
-        </div>
-      </div>
-    </section>
+     </section>
 
     <!-- Peers -->
     <section id="view-peers" hidden>
