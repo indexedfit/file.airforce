@@ -213,7 +213,7 @@ function showInvite(link) {
   });
 }
 
-async function startUI() {
+export async function startUI() {
   ({ helia, fs, libp2p } = await startHeliaMaybeFake());
   rooms = createRoomManager(helia, fs);
 
@@ -705,11 +705,6 @@ function newMsgId() {
     Date.now().toString(36)
   );
 }
-
-startUI().catch((e) => {
-  console.error(e);
-  toast("Failed to start Helia/libp2p");
-});
 // lightweight enc helper for tracker control
 function enc(obj) { return new TextEncoder().encode(JSON.stringify(obj)); }
 
