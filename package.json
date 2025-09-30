@@ -11,9 +11,8 @@
     "start": "vite",
     "test": "node tests/smoke.mjs && node tests/router.mjs",
     "test:e2e": "playwright install --with-deps && playwright test",
-    "start:relay": "node server/relay.js",
-    "start:tracker": "node server/tracker.js",
-    "start:newtracker": "node server/newtracker.js"
+    "relay": "node server/relay.js",
+    "tracker": "node server/tracker.js"
   },
   "dependencies": {
     "@chainsafe/libp2p-gossipsub": "^14.1.1",
