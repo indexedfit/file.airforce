@@ -33,6 +33,9 @@ export function createRoomManager(helia, fs) {
   // Track which rooms we've joined to prevent duplicate joins
   const joinedRooms = new Set()
 
+  // Track observer cleanup functions to prevent duplicates
+  const observerCleanups = new Map() // roomId -> [cleanup functions]
+
   /**
    * Get or create Y.Doc for a room
    * Returns a promise that resolves to the Y.Doc
@@ -125,6 +128,12 @@ export function createRoomManager(helia, fs) {
     const ydoc = await getYDoc(roomId)
     const from = libp2p?.peerId?.toString?.() || 'anon'
 
+    console.log(`[Room ${roomId.slice(0,6)}] Sending chat:`)
+    console.log(`  - Full peer ID: ${from}`)
+    console.log(`  - libp2p available:`, !!libp2p)
+    console.log(`  - peerId available:`, !!libp2p?.peerId)
+    console.log(`  - Text: "${text}"`)
+
     addChatMsg(ydoc.chat, {
       text,
       from,
@@ -165,30 +174,45 @@ export function createRoomManager(helia, fs) {
     const { manifest, onManifestUpdate, onNewFiles } = options
     const ydoc = await getYDoc(roomId)
 
-    // If we've already joined, just return (but allow re-attaching observers)
+    // Clean up old observers before attaching new ones
+    if (observerCleanups.has(roomId)) {
+      console.log(`[Room ${roomId.slice(0, 6)}] Cleaning up old observers`)
+      const cleanups = observerCleanups.get(roomId)
+      cleanups.forEach(fn => fn())
+      observerCleanups.delete(roomId)
+    }
+
+    const cleanups = []
     const alreadyJoined = joinedRooms.has(roomId)
+
     if (alreadyJoined) {
+      console.log(`[Room ${roomId.slice(0, 6)}] Re-joining (observers cleaned)`)
     } else {
+      console.log(`[Room ${roomId.slice(0, 6)}] First join`)
       joinedRooms.add(roomId)
     }
 
     // If we have a manifest, we're the host - set it (only on first join)
     if (manifest && !alreadyJoined) {
+      console.log(`[Room ${roomId.slice(0, 6)}] Setting initial manifest as host`)
       updateManifest(ydoc.manifest, manifest)
     }
 
-    // Watch for manifest changes (can be attached multiple times if needed)
+    // Watch for manifest changes
     if (onManifestUpdate) {
       const observer = () => {
         const files = ydoc.manifest.get('files') || []
-        onManifestUpdate({
+        console.log(`[Room ${roomId.slice(0, 6)}] Manifest observer fired, ${files.length} files:`, files.map(f => f.name))
+        const manifestObj = {
           files: files.map(f => ({ ...f })),
           updatedAt: ydoc.manifest.get('updatedAt') || Date.now()
-        })
+        }
+        console.log(`[Room ${roomId.slice(0, 6)}] Calling onManifestUpdate callback with:`, manifestObj)
+        onManifestUpdate(manifestObj)
       }
       ydoc.manifest.observe(observer)
-      // Trigger initial callback if there's already data
-      observer()
+      cleanups.push(() => ydoc.manifest.unobserve(observer))
+      observer() // Trigger initial
     }
 
     // Watch for new files (auto-pin)
@@ -204,6 +228,7 @@ export function createRoomManager(helia, fs) {
         }
       }
       ydoc.manifest.observe(observer)
+      cleanups.push(() => ydoc.manifest.unobserve(observer))
     }
 
     // Handle file requests (for all peers) - only on first join
@@ -217,6 +242,11 @@ export function createRoomManager(helia, fs) {
           }
         }
       })
+    }
+
+    // Store cleanup functions
+    if (cleanups.length > 0) {
+      observerCleanups.set(roomId, cleanups)
     }
 
     return ydoc

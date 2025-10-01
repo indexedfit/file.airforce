@@ -169,6 +169,9 @@ export async function createYDoc(roomId, libp2p) {
   const chat = ydoc.getArray('chat')
 
 
+  // Track sync state: 'loading' -> 'syncing' -> 'synced'
+  let syncState = 'loading'
+
   // Initialize persistence FIRST (before any network activity)
   const persistence = new YDocPersistence(roomId)
   let persistenceUnbind = null
@@ -181,8 +184,9 @@ export async function createYDoc(roomId, libp2p) {
     if (data && data.length > 0) {
       Y.applyUpdate(ydoc, data, 'storage')
       const files = manifest.get('files') || []
-      const msgs = chat.length
+      console.log(`[${roomId.slice(0, 6)}] Loaded ${files.length} files from local storage (${data.length} bytes)`)
     } else {
+      console.log(`[${roomId.slice(0, 6)}] No local storage found, starting fresh`)
     }
 
     // Start auto-saving
@@ -209,25 +213,30 @@ export async function createYDoc(roomId, libp2p) {
       const msg = dec(evt.detail.data)
 
       if (msg.type === 'Y_UPDATE') {
+        // Real-time incremental update (efficient)
         console.log(`[${roomId.slice(0, 6)}] Received Y_UPDATE (${msg.update.length} bytes)`)
         Y.applyUpdate(ydoc, new Uint8Array(msg.update), 'network')
         const files = manifest.get('files') || []
-        console.log(`[${roomId.slice(0, 6)}] Now have ${files.length} files`)
+        console.log(`[${roomId.slice(0, 6)}] After Y_UPDATE: ${files.length} files:`, files.map(f => f.name))
       }
-      else if (msg.type === 'SYNC_REQUEST') {
-        const diff = Y.encodeStateAsUpdate(ydoc, new Uint8Array(msg.stateVector))
-        console.log(`[${roomId.slice(0, 6)}] Received SYNC_REQUEST, sending ${diff.length} bytes`)
+      else if (msg.type === 'SNAPSHOT_REQUEST') {
+        // Peer wants full state (new joiner or reconnect)
+        const fullState = Y.encodeStateAsUpdate(ydoc)
+        const files = manifest.get('files') || []
+        console.log(`[${roomId.slice(0, 6)}] SNAPSHOT_REQUEST -> sending full state: ${fullState.length} bytes, ${files.length} files`)
         libp2p.services?.pubsub?.publish(topic, enc({
-          type: 'SYNC_RESPONSE',
-          update: Array.from(diff),
+          type: 'SNAPSHOT',
+          update: Array.from(fullState),
           roomId
         })).catch(() => {})
       }
-      else if (msg.type === 'SYNC_RESPONSE') {
-        console.log(`[${roomId.slice(0, 6)}] Received SYNC_RESPONSE (${msg.update.length} bytes)`)
+      else if (msg.type === 'SNAPSHOT') {
+        // Full state from peer (initial sync or refresh catch-up)
+        console.log(`[${roomId.slice(0, 6)}] Received SNAPSHOT (${msg.update.length} bytes)`)
         Y.applyUpdate(ydoc, new Uint8Array(msg.update), 'network')
+        syncState = 'synced'
         const files = manifest.get('files') || []
-        console.log(`[${roomId.slice(0, 6)}] Now have ${files.length} files`)
+        console.log(`[${roomId.slice(0, 6)}] After SNAPSHOT: ${files.length} files`, files.map(f => f.name))
       }
     } catch (err) {
       console.warn(`[${roomId.slice(0, 6)}] Failed to handle message:`, err)
@@ -244,21 +253,27 @@ export async function createYDoc(roomId, libp2p) {
 
   ydoc.on('update', updateHandler)
 
-  // Request sync initially and retry every 3s if no files yet
-  const requestSync = () => {
-    const stateVector = Y.encodeStateVector(ydoc)
-    console.log(`[${roomId.slice(0, 6)}] Requesting sync`)
+  // Request initial snapshot - always request to ensure bidirectional sync
+  const requestSnapshot = () => {
+    const files = manifest.get('files') || []
+    console.log(`[${roomId.slice(0, 6)}] Requesting SNAPSHOT (currently have ${files.length} files)`)
+    syncState = 'syncing'
     libp2p.services?.pubsub?.publish(topic, enc({
-      type: 'SYNC_REQUEST',
-      stateVector: Array.from(stateVector),
+      type: 'SNAPSHOT_REQUEST',
       roomId
     })).catch(() => {})
   }
 
-  setTimeout(requestSync, 1000)
+  // Request snapshot after delay (let peers connect)
+  setTimeout(requestSnapshot, 1000)
+
+  // Retry snapshot requests periodically until we get one
   const syncInterval = setInterval(() => {
-    if ((manifest.get('files') || []).length === 0) requestSync()
-  }, 3000)
+    if (syncState !== 'synced') {
+      console.log(`[${roomId.slice(0, 6)}] Still not synced (${syncState}), retrying SNAPSHOT_REQUEST...`)
+      requestSnapshot()
+    }
+  }, 5000)
 
   // Cleanup
   const destroy = () => {

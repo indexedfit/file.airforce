@@ -431,7 +431,12 @@ export async function startUI() {
     // Active room
     const sp = new URLSearchParams(location.search);
     const rid = sp.get("room");
-    if (!rid) return;
+    if (!rid) {
+      console.log('No room ID in URL');
+      return;
+    }
+
+    console.log('Rendering room:', rid);
 
     roomUI.setActiveRoom(rid);
     let room = getRoom(rid);
@@ -443,9 +448,13 @@ export async function startUI() {
     // Join room (handles both host and joiner)
     await rooms.join(rid, {
       onManifestUpdate: async (manifest) => {
+        console.log(`[Bootstrap] onManifestUpdate called for room ${rid.slice(0,6)}: ${manifest.files.length} files`);
         saveRoom({ id: rid, manifest });
         if (roomUI.getActiveRoom() === rid) {
+          console.log(`[Bootstrap] Re-rendering room UI`);
           await roomUI.render(rid);
+        } else {
+          console.log(`[Bootstrap] Not active room, skipping render`);
         }
       },
       onNewFiles: async (newCids) => {
@@ -481,8 +490,26 @@ export async function startUI() {
     const rInput = document.getElementById("room-file-input");
     const rBrowse = document.getElementById("btn-room-browse");
 
-    if (rBrowse && rInput) rBrowse.onclick = () => rInput.click();
-    if (rInput) rInput.onchange = () => handleRoomFiles(rid, rInput.files);
+    if (!rBrowse) console.warn('btn-room-browse not found!');
+    if (!rInput) console.warn('room-file-input not found!');
+
+    if (rBrowse && rInput) {
+      console.log('Binding room file input handlers for room', rid.slice(0, 6));
+      // Remove old handlers to prevent duplicates
+      rBrowse.onclick = null;
+      rInput.onchange = null;
+
+      rBrowse.onclick = () => {
+        console.log('Browse clicked');
+        rInput.click();
+      };
+      rInput.onchange = () => {
+        console.log('File input changed:', rInput.files?.length || 0, 'files');
+        if (rInput.files && rInput.files.length > 0) {
+          handleRoomFiles(rid, rInput.files);
+        }
+      };
+    }
     if (rDrop) {
       rDrop.ondragover = (e) => {
         e.preventDefault();
