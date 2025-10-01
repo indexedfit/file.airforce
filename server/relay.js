@@ -12,7 +12,9 @@ import { PUBSUB_PEER_DISCOVERY } from '../src/constants.js'
 
 async function main() {
   const libp2p = await createLibp2p({
-    addresses: { listen: ['/ip4/0.0.0.0/tcp/9001/ws', '/ip4/0.0.0.0/tcp/9002'] },
+    addresses: {
+      listen: ['/ip4/0.0.0.0/tcp/9004/ws', '/ip4/0.0.0.0/tcp/9003'],
+    },
     transports: [webSockets(), tcp()],
     connectionEncrypters: [noise()],
     streamMuxers: [yamux()],

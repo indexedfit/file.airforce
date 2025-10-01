@@ -1,21 +1,157 @@
 // @ts-check
 import * as Y from 'yjs'
 import { ROOM_TOPIC } from './constants.js'
-import { YDocPersistence } from './ydoc-persistence.js'
 
 /**
  * Y.js document manager - handles CRDT sync over libp2p gossipsub
  * No y-webrtc or y-libp2p-connector - we use our existing libp2p mesh
  */
 
+// ===== Persistence (OPFS + IndexedDB fallback) =====
+
+async function hasOPFS() {
+  try {
+    return !!(navigator?.storage?.getDirectory);
+  } catch {
+    return false;
+  }
+}
+
+class OPFSPersistence {
+  constructor(docName) {
+    this.docName = docName;
+    this.dir = null;
+    this.file = null;
+  }
+
+  async init() {
+    try {
+      const root = await navigator.storage.getDirectory();
+      this.dir = await root.getDirectoryHandle('ydocs', { create: true });
+      this.file = await this.dir.getFileHandle(`${this.docName}.yjs`, { create: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async load() {
+    try {
+      const handle = await this.dir.getFileHandle(`${this.docName}.yjs`);
+      const file = await handle.getFile();
+      const buffer = await file.arrayBuffer();
+      return new Uint8Array(buffer);
+    } catch {
+      return null;
+    }
+  }
+
+  async save(update) {
+    try {
+      const writable = await this.file.createWritable();
+      await writable.write(update);
+      await writable.close();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+class IndexedDBPersistence {
+  constructor(docName) {
+    this.docName = docName;
+    this.dbName = 'ydocs';
+    this.storeName = 'updates';
+    this.db = null;
+  }
+
+  async init() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(this.dbName, 1);
+      req.onerror = () => reject(req.error);
+      req.onsuccess = () => {
+        this.db = req.result;
+        resolve(true);
+      };
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(this.storeName)) {
+          db.createObjectStore(this.storeName);
+        }
+      };
+    });
+  }
+
+  async load() {
+    return new Promise((resolve) => {
+      const tx = this.db.transaction(this.storeName, 'readonly');
+      const store = tx.objectStore(this.storeName);
+      const req = store.get(this.docName);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  }
+
+  async save(update) {
+    return new Promise((resolve) => {
+      const tx = this.db.transaction(this.storeName, 'readwrite');
+      const store = tx.objectStore(this.storeName);
+      const req = store.put(update, this.docName);
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => resolve(false);
+    });
+  }
+}
+
+class YDocPersistence {
+  constructor(docName) {
+    this.docName = docName;
+    this.provider = null;
+    this.type = null;
+  }
+
+  async init() {
+    if (await hasOPFS()) {
+      const opfs = new OPFSPersistence(this.docName);
+      if (await opfs.init()) {
+        this.provider = opfs;
+        this.type = 'opfs';
+        return true;
+      }
+    }
+    try {
+      const idb = new IndexedDBPersistence(this.docName);
+      await idb.init();
+      this.provider = idb;
+      this.type = 'indexeddb';
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async load() {
+    return this.provider?.load();
+  }
+
+  async save(update) {
+    return this.provider?.save(update);
+  }
+
+  bindDoc(ydoc) {
+    const saveHandler = (update, origin) => {
+      if (origin === 'storage') return;
+      const fullState = Y.encodeStateAsUpdate(ydoc);
+      this.save(fullState).catch(() => {});
+    };
+    ydoc.on('update', saveHandler);
+    return () => ydoc.off('update', saveHandler);
+  }
+}
+
 const enc = (obj) => new TextEncoder().encode(JSON.stringify(obj))
 const dec = (buf) => JSON.parse(new TextDecoder().decode(buf))
-
-const DEBUG = true
-
-function log(roomId, ...args) {
-  if (DEBUG) console.log(`[Y.js ${roomId.slice(0, 6)}]`, ...args)
-}
 
 /**
  * Creates a Y.js document manager for a room
@@ -32,7 +168,6 @@ export async function createYDoc(roomId, libp2p) {
   const manifest = ydoc.getMap('manifest')
   const chat = ydoc.getArray('chat')
 
-  log(roomId, 'Creating Y.Doc')
 
   // Initialize persistence FIRST (before any network activity)
   const persistence = new YDocPersistence(roomId)
@@ -40,7 +175,6 @@ export async function createYDoc(roomId, libp2p) {
 
   try {
     await persistence.init()
-    log(roomId, `Persistence ready (${persistence.type})`)
 
     // Load existing state from storage
     const data = await persistence.load()
@@ -48,9 +182,7 @@ export async function createYDoc(roomId, libp2p) {
       Y.applyUpdate(ydoc, data, 'storage')
       const files = manifest.get('files') || []
       const msgs = chat.length
-      log(roomId, `Loaded state: ${files.length} files, ${msgs} chat messages`)
     } else {
-      log(roomId, 'No persisted state found')
     }
 
     // Start auto-saving
@@ -59,81 +191,46 @@ export async function createYDoc(roomId, libp2p) {
     console.warn('Persistence init failed:', err)
   }
 
-  // Track sync state
-  let synced = false
-  let syncRequested = false
-
   // Broadcast updates to gossipsub
   const updateHandler = (update, origin) => {
-    // Don't rebroadcast updates we received from the network
     if (origin === 'network' || origin === 'storage') return
-
-    log(roomId, `Broadcasting update (${update.length} bytes)`)
-
-    try {
-      libp2p.services?.pubsub?.publish(topic, enc({
-        type: 'Y_UPDATE',
-        update: Array.from(update),
-        roomId
-      })).catch(err => {
-        // Ignore "no peers" errors - normal when you're the only one in the room
-        if (err.message?.includes('NoPeersSubscribedToTopic')) {
-          log(roomId, 'No peers yet, update saved locally')
-        } else {
-          console.warn('Failed to publish Y.js update:', err)
-        }
-      })
-    } catch (err) {
-      // Synchronous errors
-      if (err.message?.includes('NoPeersSubscribedToTopic')) {
-        log(roomId, 'No peers yet, update saved locally')
-      } else {
-        console.warn('Failed to publish Y.js update:', err)
-      }
-    }
+    console.log(`[${roomId.slice(0, 6)}] Broadcasting Y_UPDATE (${update.length} bytes)`)
+    libp2p.services?.pubsub?.publish(topic, enc({
+      type: 'Y_UPDATE',
+      update: Array.from(update),
+      roomId
+    })).catch(() => {})
   }
 
   // Listen for remote updates
   const messageHandler = (evt) => {
     if (evt.detail.topic !== topic) return
-
     try {
       const msg = dec(evt.detail.data)
 
       if (msg.type === 'Y_UPDATE') {
-        log(roomId, `Received Y_UPDATE (${msg.update.length} bytes)`)
+        console.log(`[${roomId.slice(0, 6)}] Received Y_UPDATE (${msg.update.length} bytes)`)
         Y.applyUpdate(ydoc, new Uint8Array(msg.update), 'network')
-        synced = true
+        const files = manifest.get('files') || []
+        console.log(`[${roomId.slice(0, 6)}] Now have ${files.length} files`)
       }
       else if (msg.type === 'SYNC_REQUEST') {
-        log(roomId, 'Received SYNC_REQUEST, sending full state')
-        const stateVector = new Uint8Array(msg.stateVector)
-        const diff = Y.encodeStateAsUpdate(ydoc, stateVector)
-
-        const files = manifest.get('files') || []
-        log(roomId, `Responding with state: ${files.length} files, ${diff.length} bytes`)
-
+        const diff = Y.encodeStateAsUpdate(ydoc, new Uint8Array(msg.stateVector))
+        console.log(`[${roomId.slice(0, 6)}] Received SYNC_REQUEST, sending ${diff.length} bytes`)
         libp2p.services?.pubsub?.publish(topic, enc({
           type: 'SYNC_RESPONSE',
           update: Array.from(diff),
           roomId
-        })).catch(err => {
-          if (!err.message?.includes('NoPeersSubscribedToTopic')) {
-            console.warn('Failed to send SYNC_RESPONSE:', err)
-          }
-        })
+        })).catch(() => {})
       }
       else if (msg.type === 'SYNC_RESPONSE') {
-        log(roomId, `Received SYNC_RESPONSE (${msg.update.length} bytes)`)
+        console.log(`[${roomId.slice(0, 6)}] Received SYNC_RESPONSE (${msg.update.length} bytes)`)
         Y.applyUpdate(ydoc, new Uint8Array(msg.update), 'network')
-        synced = true
-
         const files = manifest.get('files') || []
-        const msgs = chat.length
-        log(roomId, `After sync: ${files.length} files, ${msgs} chat messages`)
+        console.log(`[${roomId.slice(0, 6)}] Now have ${files.length} files`)
       }
     } catch (err) {
-      console.warn('Failed to handle Y.js message:', err)
+      console.warn(`[${roomId.slice(0, 6)}] Failed to handle message:`, err)
     }
   }
 
@@ -141,52 +238,26 @@ export async function createYDoc(roomId, libp2p) {
   try {
     libp2p.services?.pubsub?.subscribe(topic)
     libp2p.services?.pubsub?.addEventListener('message', messageHandler)
-    log(roomId, 'Subscribed to pubsub topic')
   } catch (err) {
-    console.warn('Failed to subscribe to topic:', err)
+    console.warn('Failed to subscribe:', err)
   }
 
-  // Start broadcasting local updates
   ydoc.on('update', updateHandler)
 
-  // Request initial sync after a delay (allow time for peers to appear)
-  setTimeout(() => {
-    if (!synced && !syncRequested) {
-      syncRequested = true
-      try {
-        const stateVector = Y.encodeStateVector(ydoc)
-        log(roomId, 'Requesting sync from peers')
-        libp2p.services?.pubsub?.publish(topic, enc({
-          type: 'SYNC_REQUEST',
-          stateVector: Array.from(stateVector),
-          roomId
-        })).catch(err => {
-          if (!err.message?.includes('NoPeersSubscribedToTopic')) {
-            console.warn('Failed to request sync:', err)
-          }
-        })
-      } catch (err) {
-        if (!err.message?.includes('NoPeersSubscribedToTopic')) {
-          console.warn('Failed to request sync:', err)
-        }
-      }
-    }
-  }, 1000)
+  // Request sync initially and retry every 3s if no files yet
+  const requestSync = () => {
+    const stateVector = Y.encodeStateVector(ydoc)
+    console.log(`[${roomId.slice(0, 6)}] Requesting sync`)
+    libp2p.services?.pubsub?.publish(topic, enc({
+      type: 'SYNC_REQUEST',
+      stateVector: Array.from(stateVector),
+      roomId
+    })).catch(() => {})
+  }
 
-  // Periodic sync requests if not synced (for late joiners)
+  setTimeout(requestSync, 1000)
   const syncInterval = setInterval(() => {
-    const files = manifest.get('files') || []
-    if (!synced && files.length === 0) {
-      try {
-        const stateVector = Y.encodeStateVector(ydoc)
-        log(roomId, 'Retrying sync request')
-        libp2p.services?.pubsub?.publish(topic, enc({
-          type: 'SYNC_REQUEST',
-          stateVector: Array.from(stateVector),
-          roomId
-        })).catch(() => {}) // Silently fail for retries
-      } catch {}
-    }
+    if ((manifest.get('files') || []).length === 0) requestSync()
   }, 3000)
 
   // Cleanup
@@ -199,7 +270,6 @@ export async function createYDoc(roomId, libp2p) {
       libp2p.services?.pubsub?.unsubscribe(topic)
     } catch {}
     ydoc.destroy()
-    log(roomId, 'Destroyed')
   }
 
   return Object.assign(ydoc, { manifest, chat, destroy, ready: true })

@@ -1,6 +1,9 @@
 // @ts-check
-import { createYDoc, updateManifest, addChatMsg } from './ydoc.js'
+import { createYDoc, updateManifest, addChatMsg, getChatMessages } from './ydoc.js'
 import { ROOM_TOPIC } from './constants.js'
+import { renderRoomDetails, renderChatMessages } from './ui.js'
+import { getRoom } from './store.js'
+import { fetchFileAsBlob, openFile, downloadFile } from './file-manager.js'
 
 /**
  * Simplified room manager using Y.js for state sync
@@ -165,15 +168,12 @@ export function createRoomManager(helia, fs) {
     // If we've already joined, just return (but allow re-attaching observers)
     const alreadyJoined = joinedRooms.has(roomId)
     if (alreadyJoined) {
-      console.log(`[Room ${roomId.slice(0,6)}] Already joined, re-attaching observers only`)
     } else {
-      console.log(`[Room ${roomId.slice(0,6)}] Joining...`)
       joinedRooms.add(roomId)
     }
 
     // If we have a manifest, we're the host - set it (only on first join)
     if (manifest && !alreadyJoined) {
-      console.log(`[Room ${roomId.slice(0,6)}] Setting initial manifest (${manifest.files.length} files)`)
       updateManifest(ydoc.manifest, manifest)
     }
 
@@ -181,7 +181,6 @@ export function createRoomManager(helia, fs) {
     if (onManifestUpdate) {
       const observer = () => {
         const files = ydoc.manifest.get('files') || []
-        console.log(`[Room ${roomId.slice(0,6)}] Manifest changed: ${files.length} files`)
         onManifestUpdate({
           files: files.map(f => ({ ...f })),
           updatedAt: ydoc.manifest.get('updatedAt') || Date.now()
@@ -200,7 +199,6 @@ export function createRoomManager(helia, fs) {
         const currentFiles = new Set(files.map(f => f.cid))
         const newCids = [...currentFiles].filter(cid => !prevFiles.has(cid))
         if (newCids.length > 0) {
-          console.log(`[Room ${roomId.slice(0,6)}] New files detected: ${newCids.length}`)
           onNewFiles(newCids)
           prevFiles = currentFiles
         }
@@ -212,7 +210,6 @@ export function createRoomManager(helia, fs) {
     if (!alreadyJoined) {
       subscribe(roomId, async (msg) => {
         if (msg.type === 'FILE_REQUEST') {
-          console.log(`[Room ${roomId.slice(0,6)}] File request for ${msg.cids?.length} CIDs`)
           for (const cid of msg.cids || []) {
             try {
               for await (const _ of helia.pin.add(cid)) {}
@@ -248,5 +245,171 @@ export function createRoomManager(helia, fs) {
     getManifest,
     join,
     destroyRoom
+  }
+}
+
+/**
+ * Room UI management: rendering, event binding, subscriptions
+ */
+export class RoomUI {
+  constructor({ rooms, fs, libp2p, helia, onProgress }) {
+    this.rooms = rooms;
+    this.fs = fs;
+    this.libp2p = libp2p;
+    this.helia = helia;
+    this.onProgress = onProgress;
+    this.activeRoomId = null;
+    this.chatUnsub = null;
+  }
+
+  setActiveRoom(roomId) {
+    this.activeRoomId = roomId;
+  }
+
+  getActiveRoom() {
+    return this.activeRoomId;
+  }
+
+  bindRoomButtons(roomId) {
+    const filesUl = document.getElementById("room-files");
+    if (filesUl) {
+      filesUl.onclick = async (e) => {
+        const target = e.target.closest("button[data-action]");
+        if (!target) {
+          const li = e.target.closest("li[data-idx]");
+          if (!li) return;
+          filesUl.querySelectorAll("li").forEach((n) => n.classList.remove("is-selected"));
+          li.classList.add("is-selected");
+          return;
+        }
+        const action = target.dataset.action;
+        const cid = target.dataset.cid;
+        const name = target.dataset.name || "file";
+        if (!cid) return;
+        try {
+          const label = action === "open-file" ? "Opening…" : "Downloading…";
+          this.onProgress(true, 0, 0, label);
+          const blob = await fetchFileAsBlob(this.fs, cid, name, (loaded, total) => {
+            this.onProgress(true, loaded, total, `${loaded} bytes`);
+          });
+          if (action === "open-file") openFile(blob, name);
+          else if (action === "download-file") downloadFile(blob, name);
+        } catch (err) {
+          console.error(err);
+        } finally {
+          this.onProgress(false);
+        }
+      };
+      filesUl.ondblclick = () => {
+        const li = filesUl.querySelector("li.is-selected") || filesUl.querySelector('li[data-idx="0"]');
+        if (!li) return;
+        const btn = li.querySelector('button[data-action="open-file"]');
+        btn?.click();
+      };
+      filesUl.onkeydown = (e) => {
+        const tag = (e.target?.tagName || "").toLowerCase();
+        if (tag === "input" || tag === "textarea") return;
+        if (!["ArrowDown", "ArrowUp", "Enter"].includes(e.key)) return;
+        e.preventDefault();
+        const items = Array.from(filesUl.querySelectorAll("li[data-idx]"));
+        if (!items.length) return;
+        let idx = items.findIndex((n) => n.classList.contains("is-selected"));
+        if (idx < 0) idx = 0;
+        if (e.key === "ArrowDown") idx = Math.min(items.length - 1, idx + 1);
+        if (e.key === "ArrowUp") idx = Math.max(0, idx - 1);
+        items.forEach((n) => n.classList.remove("is-selected"));
+        const sel = items[idx];
+        sel.classList.add("is-selected");
+        sel.focus();
+        if (e.key === "Enter") {
+          const btn = sel.querySelector('button[data-action="open-file"]');
+          btn?.click();
+        }
+      };
+      queueMicrotask(() => {
+        const first = filesUl.querySelector('li[data-idx="0"]');
+        if (first) first.classList.add("is-selected");
+      });
+    }
+
+    const input = document.getElementById("chat-input");
+    const send = document.getElementById("btn-chat-send");
+    if (send && input) {
+      const sendNow = async () => {
+        const text = input.value.trim();
+        if (!text) return;
+        const mid = crypto.randomUUID();
+        this.rooms.sendChat(roomId, text, mid).catch(() => {});
+        input.value = "";
+      };
+      send.onclick = sendNow;
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          sendNow();
+        }
+      };
+    }
+
+    const copyBtn = document.getElementById("btn-copy-room-link");
+    if (copyBtn) {
+      copyBtn.onclick = () => {
+        try {
+          const link = this.buildInviteURL(roomId);
+          navigator.clipboard.writeText(link).then(() => {
+            const toast = document.getElementById("toast");
+            if (toast) {
+              toast.textContent = "Link copied";
+              toast.hidden = false;
+              setTimeout(() => (toast.hidden = true), 2000);
+            }
+          });
+        } catch (e) {
+          console.error(e);
+        }
+      };
+    }
+  }
+
+  buildInviteURL(roomId) {
+    const u = new URL(location.href);
+    u.searchParams.set("view", "rooms");
+    u.searchParams.set("room", roomId);
+    return u.toString();
+  }
+
+  async subscribeChat(roomId) {
+    if (this.chatUnsub) {
+      this.chatUnsub();
+      this.chatUnsub = null;
+    }
+    const ydoc = await this.rooms.getYDoc(roomId);
+    const observer = () => {
+      if (roomId === this.activeRoomId) {
+        const messages = getChatMessages(ydoc.chat);
+        renderChatMessages(messages, this.libp2p.peerId.toString());
+      }
+    };
+    ydoc.chat.observe(observer);
+    this.chatUnsub = () => ydoc.chat.unobserve(observer);
+    observer();
+  }
+
+  async render(roomId) {
+    this.activeRoomId = roomId;
+    const room = getRoom(roomId);
+    const manifest = room?.manifest || (await this.rooms.getManifest(roomId));
+    renderRoomDetails({
+      id: roomId,
+      name: room?.name || `Room ${roomId.slice(0, 6)}`,
+      manifest,
+    });
+    this.bindRoomButtons(roomId);
+    await this.subscribeChat(roomId);
+  }
+
+  cleanup() {
+    if (this.chatUnsub) this.chatUnsub();
+    this.chatUnsub = null;
   }
 }

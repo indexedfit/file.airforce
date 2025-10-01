@@ -1,7 +1,44 @@
 import QRCode from "qrcode";
 import { startHelia } from "./heliaNode.js";
 import { createRoomManager } from "./room.js";
-import { bindNavLinks, renderView, goto, currentView } from "./router.js";
+import { WebRTC, WebSockets, WebSocketsSecure, WebTransport, Circuit, WebRTCDirect } from '@multiformats/multiaddr-matcher';
+
+// Simple routing
+const views = ['home', 'drops', 'rooms', 'peers'];
+function currentView() {
+  const sp = new URLSearchParams(location.search);
+  const v = sp.get('view');
+  return views.includes(v) ? v : 'home';
+}
+function goto(view, extras = {}) {
+  if (view === 'home' && Object.keys(extras).length === 0) {
+    history.pushState(null, '', '/');
+    renderView();
+    return;
+  }
+  const sp = new URLSearchParams();
+  sp.set('view', view);
+  for (const [k, v] of Object.entries(extras)) if (v != null) sp.set(k, v);
+  history.pushState(null, '', `?${sp.toString()}`);
+  renderView();
+}
+function renderView() {
+  const v = currentView();
+  for (const name of views) {
+    const el = document.getElementById(`view-${name}`);
+    if (el) el.hidden = name !== v;
+  }
+}
+function bindNavLinks() {
+  document.querySelectorAll('a[data-link]').forEach(a => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      const url = new URL(a.href);
+      goto(url.searchParams.get('view') || 'home');
+    });
+  });
+  window.addEventListener('popstate', renderView);
+}
 import {
   renderAddresses,
   renderPeerTypes,
@@ -22,50 +59,38 @@ import {
   getRoom,
   getRooms,
 } from "./store.js";
-import { TRACKERS, TRACKER_CONTROL, CONTENT_TOPIC } from "./constants.js";
-import { listAddresses, countPeerTypes, peerDetails } from "./peers.js";
 import { addFilesAndCreateManifest, formatBytes } from "./file-manager.js";
-import { RoomUI } from "./room-ui.js";
+
+// Peer info helpers
+function listAddresses(libp2p) {
+  return libp2p.getMultiaddrs().map(ma => ma.toString());
+}
+function countPeerTypes(libp2p) {
+  const t = { 'Circuit Relay': 0, WebRTC: 0, 'WebRTC Direct': 0, WebSockets: 0, 'WebSockets (secure)': 0, WebTransport: 0, Other: 0 };
+  libp2p.getConnections().map(c => c.remoteAddr).forEach((ma) => {
+    if (WebRTC.exactMatch(ma)) t['WebRTC']++;
+    else if (WebRTCDirect.exactMatch(ma)) t['WebRTC Direct']++;
+    else if (WebSockets.exactMatch(ma)) t['WebSockets']++;
+    else if (WebSocketsSecure.exactMatch(ma)) t['WebSockets (secure)']++;
+    else if (WebTransport.exactMatch(ma)) t['WebTransport']++;
+    else if (Circuit.exactMatch(ma)) t['Circuit Relay']++;
+    else t['Other']++;
+  });
+  return t;
+}
+function peerDetails(libp2p) {
+  return libp2p.getPeers().map(peer => {
+    const conns = libp2p.getConnections(peer);
+    return { id: peer.toString(), addrs: conns.map(c => c.remoteAddr.toString()) };
+  });
+}
+import { RoomUI } from "./room.js";
 
 const $ = (id) => document.getElementById(id);
 
-let helia, fs, libp2p, rooms, blockstore;
+let helia, fs, libp2p, rooms;
 let roomUI;
 
-function urlFlag(name) {
-  return new URLSearchParams(location.search).has(name);
-}
-
-async function startHeliaMaybeFake() {
-  if (urlFlag("fake")) {
-    const fakePeerId =
-      "fake-" + (crypto.randomUUID?.() || Math.random().toString(36).slice(2));
-    const fake = {
-      libp2p: {
-        peerId: { toString: () => fakePeerId },
-        getConnections: () => [],
-        getMultiaddrs: () => [],
-      },
-    };
-    const fakeFs = {
-      async addBytes(bytes) {
-        return {
-          toString: () =>
-            `bafk${bytes.length.toString(36)}${Math.random()
-              .toString(36)
-              .slice(2, 8)}`,
-        };
-      },
-    };
-    fake.pin = { add: async function* () {} };
-    const fakeBlockstore = {
-      on: () => {},
-      stats: { blocksReceived: 0, blocksSent: 0 },
-    };
-    return { helia: fake, fs: fakeFs, libp2p: fake.libp2p, blockstore: fakeBlockstore };
-  }
-  return startHelia();
-}
 
 function showFetchProgress(show, loaded = 0, total = 0, label = "") {
   showUploadProgress(show);
@@ -134,9 +159,6 @@ function buildInviteURL(roomId) {
   const u = new URL(location.href);
   u.searchParams.set("view", "rooms");
   u.searchParams.set("room", roomId);
-  u.searchParams.set("host", helia.libp2p.peerId.toString());
-  const tr = globalThis.wcInviteExtras?.tracker || TRACKERS?.[0] || "";
-  if (tr) u.searchParams.set("tracker", encodeURIComponent(tr));
   return u.toString();
 }
 
@@ -154,40 +176,10 @@ function showInvite(link) {
   });
 }
 
-function updateBitswapStatus(status) {
-  const el = document.getElementById("bitswap-status");
-  if (el) {
-    el.textContent = status;
-    el.classList.remove("hidden");
-  }
-}
 
-function enc(obj) {
-  return new TextEncoder().encode(JSON.stringify(obj));
-}
-
-async function announceToTracker(roomId, manifest) {
-  try {
-    const cids = (manifest?.files || []).map((f) => f.cid).filter(Boolean);
-    if (!cids.length) return;
-    await libp2p.services.pubsub.publish(
-      TRACKER_CONTROL,
-      enc({
-        type: "TRACKER_ANNOUNCE",
-        roomId,
-        fileCids: cids,
-        host: libp2p.peerId.toString(),
-        ts: Date.now(),
-      })
-    );
-    await libp2p.services.pubsub.publish(CONTENT_TOPIC, enc({ roomId, cids }));
-  } catch (e) {
-    console.warn("tracker announce failed", e?.message);
-  }
-}
 
 export async function startUI() {
-  ({ helia, fs, libp2p, blockstore } = await startHeliaMaybeFake());
+  ({ helia, fs, libp2p } = await startHelia());
   rooms = createRoomManager(helia, fs);
 
   // Initialize room UI manager
@@ -199,35 +191,7 @@ export async function startUI() {
     onProgress: showFetchProgress,
   });
 
-  // Monitor bitswap activity
-  if (blockstore?.on) {
-    blockstore.on("block:get", (event, data) => {
-      console.log(
-        `📦 Block received: ${data.cid.slice(0, 12)}... (${data.size} bytes, ${data.duration}ms)`
-      );
-      const status = `Blocks: ${data.stats.blocksReceived} received, ${
-        data.stats.blocksSent
-      } sent | ${formatBytes(data.stats.bytesReceived)} ↓`;
-      updateBitswapStatus(status);
-    });
-  }
-
-  // Store invite extras globally for URL building
-  const sp0 = new URLSearchParams(location.search);
-  globalThis.wcInviteExtras = {
-    host: libp2p.peerId.toString(),
-    tracker: sp0.get("tracker")
-      ? decodeURIComponent(sp0.get("tracker"))
-      : TRACKERS?.[0] || "",
-  };
-
   setPeerId(libp2p.peerId.toString());
-
-  // Subscribe to content/control topics (peer discovery is automatic)
-  try {
-    libp2p.services?.pubsub?.subscribe?.(CONTENT_TOPIC);
-    libp2p.services?.pubsub?.subscribe?.(TRACKER_CONTROL);
-  } catch {}
 
   // Update peer info periodically
   setInterval(() => {
@@ -368,18 +332,10 @@ export async function startUI() {
       // Join as host
       rooms.join(room.id, { manifest });
 
-      announceToTracker(room.id, manifest).catch(() => {});
-
       renderDrops(getDrops().slice(0, 5), "drops-list");
 
       // Navigate to room
-      const extras = { room: room.id, host: libp2p.peerId.toString() };
-      if (TRACKERS?.length) extras.tracker = encodeURIComponent(TRACKERS[0]);
-      goto("rooms", extras);
-      globalThis.wcInviteExtras = {
-        host: libp2p.peerId.toString(),
-        tracker: TRACKERS?.[0] || "",
-      };
+      goto("rooms", { room: room.id });
 
       await renderRoomsIfActive();
       showInvite(buildInviteURL(room.id));
@@ -446,7 +402,6 @@ export async function startUI() {
 
       saveRoom({ id: roomId, manifest: merged });
       rooms.setManifest(roomId, merged);
-      announceToTracker(roomId, merged).catch(() => {});
 
       // Pin locally
       for (const f of added.files) {
@@ -488,22 +443,28 @@ export async function startUI() {
     // Join room (handles both host and joiner)
     await rooms.join(rid, {
       onManifestUpdate: async (manifest) => {
-        console.log(`[Bootstrap] Manifest update callback: ${manifest.files.length} files`);
         saveRoom({ id: rid, manifest });
-        // Re-render on manifest changes
         if (roomUI.getActiveRoom() === rid) {
           await roomUI.render(rid);
         }
       },
       onNewFiles: async (newCids) => {
-        showFetchProgress(true, 0, newCids.length, `Syncing 0/${newCids.length}`);
-        let done = 0;
-        for (const cid of newCids) {
+        const room = getRoom(rid);
+        const filesByCid = new Map(room?.manifest?.files?.map(f => [f.cid, f]) || []);
+
+        for (let i = 0; i < newCids.length; i++) {
+          const cid = newCids[i];
+          const file = filesByCid.get(cid);
+          const name = file?.name || cid.slice(0, 8);
+          const size = file?.size ? formatBytes(file.size) : '';
+
+          showFetchProgress(true, i + 1, newCids.length, `${name} ${size}`.trim());
+
           try {
             for await (const _ of helia.pin.add(cid)) {}
-          } catch {}
-          done++;
-          showFetchProgress(true, done, newCids.length, `Syncing ${done}/${newCids.length}`);
+          } catch (err) {
+            console.warn(`Failed to pin ${cid}:`, err.message);
+          }
         }
         showFetchProgress(false);
       },

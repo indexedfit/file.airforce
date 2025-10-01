@@ -14,38 +14,28 @@ import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import { bootstrap } from "@libp2p/bootstrap";
 import { inspectorMetrics } from "@ipshipyard/libp2p-inspector-metrics";
 import { createOPFSBlockstore } from "./opfs-blockstore.js";
-import { BlockstoreMonitor } from "./blockstore-monitor.js";
 import { PUBSUB_PEER_DISCOVERY, TRACKERS } from "./constants.js";
 
 export async function startHelia() {
-  const baseBlockstore = await createOPFSBlockstore("wc-blocks");
-  const blockstore = new BlockstoreMonitor(baseBlockstore);
-
-  // special case for invite via 'tracker' (relay?)
-  // use tracker(s) from invite URL when present so all participants share the same relay
-  const TRACKERS_ACTIVE = (() => {
-    try {
-      const sp = new URLSearchParams(globalThis.location?.search || "");
-      const t = sp.get("tracker");
-      if (!t) return TRACKERS;
-      return decodeURIComponent(t).split("|").filter(Boolean);
-    } catch {
-      return TRACKERS;
-    }
-  })();
+  const blockstore = await createOPFSBlockstore("wc-blocks");
 
   const libp2p = await createLibp2p({
     metrics: inspectorMetrics(),
     addresses: { listen: ["/p2p-circuit", "/webrtc"] },
-    transports: [webSockets(), webTransport(), webRTC(), circuitRelayTransport({ discoverRelays: 2 })],
+    transports: [
+      webSockets(),
+      webTransport(),
+      webRTC(),
+      circuitRelayTransport()
+    ],
     connectionEncrypters: [noise()],
-    connectionManager: { maxConnections: 50, autoDial: true },
+    connectionManager: { maxConnections: 50, minConnections: 2, autoDial: true },
     streamMuxers: [yamux()],
     connectionGater: {
       denyDialMultiaddr: async () => false,
     },
     peerDiscovery: [
-      bootstrap({ list: TRACKERS_ACTIVE }),
+      bootstrap({ list: TRACKERS }),
       pubsubPeerDiscovery({ interval: 3_000, topics: [PUBSUB_PEER_DISCOVERY] }),
     ],
     services: {
@@ -54,10 +44,15 @@ export async function startHelia() {
     },
   });
 
-  // Autodial newly discovered peers (helps the mesh form fast)
-  libp2p.addEventListener("peer:discovery", (evt) => {
-    libp2p.dial(evt.detail.id).catch(() => {});
-  });
+  libp2p.addEventListener('peer:discovery', (evt) => {
+    const peerId = evt.detail.id.toString();
+    console.log(`Discovered ${peerId.slice(0, 8)}, dialing...`)
+    libp2p.dial(evt.detail.id).then(() => {
+      console.log(`✓ Connected to ${peerId.slice(0, 8)}`)
+    }).catch((err) => {
+      console.log(`✗ Failed to dial ${peerId.slice(0, 8)}:`, err.message)
+    })
+  })
 
   const helia = await createHelia({
     libp2p,
@@ -69,5 +64,5 @@ export async function startHelia() {
   // Start Helia (starts its libp2p internally)
   if (typeof helia.start === "function") await helia.start();
 
-  return { helia, fs, libp2p, blockstore };
+  return { helia, fs, libp2p };
 }
