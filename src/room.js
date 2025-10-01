@@ -1,362 +1,252 @@
 // @ts-check
-import { ROOM_TOPIC } from "./constants.js";
-import { saveRoom, updateRoomLastSeen } from "./store.js";
+import { createYDoc, updateManifest, addChatMsg } from './ydoc.js'
+import { ROOM_TOPIC } from './constants.js'
 
-function enc(obj) {
-  return new TextEncoder().encode(JSON.stringify(obj));
-}
-function dec(buf) {
-  return JSON.parse(new TextDecoder().decode(buf));
-}
+/**
+ * Simplified room manager using Y.js for state sync
+ * Y.js handles all manifest + chat synchronization via CRDTs
+ * This file only handles lightweight file request signaling
+ */
+
+const enc = (obj) => new TextEncoder().encode(JSON.stringify(obj))
+const dec = (buf) => JSON.parse(new TextDecoder().decode(buf))
 
 /**
  * @typedef {Object} FileEntry
  * @property {string} name
  * @property {number=} size
  * @property {string} cid
- *
- * @typedef {Object} Manifest
- * @property {FileEntry[]} files
- * @property {number=} seq
- * @property {number=} updatedAt
- *
- * @typedef {'HELLO'|'MANIFEST'|'REQUEST'|'ACK'|'CHAT'} RoomMsgType
- *
- * @typedef {Object} RoomMessage
- * @property {RoomMsgType} type
- * @property {string} roomId
- * @property {string=} from
- * @property {string=} text
- * @property {string[]=} fileCids
- * @property {Manifest=} manifest
- * @property {number=} ts
- * @property {number=} ttl // rebroadcast budget (decremented on forward)
- * @property {string=} msgId // dedupe id
  */
 
 export function createRoomManager(helia, fs) {
-  const libp2p = helia?.libp2p;
+  const libp2p = helia?.libp2p
 
-  // Fallback pubsub for fake/dev mode (BroadcastChannel per topic)
-  const bcMap = new Map(); // topic -> BroadcastChannel
+  // roomId -> Y.Doc (or Promise<Y.Doc>)
+  const ydocs = new Map()
 
-  // roomId -> { handler: fn, count: number }
-  const topicHandlers = new Map();
-  // roomId -> Set<fn>
-  const subs = new Map();
+  // roomId -> Set<fn> for custom message handlers (file requests, etc)
+  const handlers = new Map()
 
-  // --------- tiny per-topic outbox with exponential backoff ----------
-  // topic -> { queue: any[], attempts: number, timer: any }
-  const outbox = new Map();
-  const MAX_BACKOFF_MS = 8000;
-  const BASE_MS = 250;
+  // Track which rooms we've joined to prevent duplicate joins
+  const joinedRooms = new Set()
 
-  // message de-dup (recent msgIds)
-  const seenMsg = new Map(); // topic -> LRU Set<string>
-  const SEEN_LIMIT = 400;
-  const rememberSeen = (topic, id) => {
-    let s = seenMsg.get(topic);
-    if (!s) {
-      s = new Set();
-      seenMsg.set(topic, s);
+  /**
+   * Get or create Y.Doc for a room
+   * Returns a promise that resolves to the Y.Doc
+   */
+  async function getYDoc(roomId) {
+    if (!ydocs.has(roomId)) {
+      const ydocPromise = createYDoc(roomId, libp2p)
+      ydocs.set(roomId, ydocPromise)
+      const ydoc = await ydocPromise
+      ydocs.set(roomId, ydoc) // Replace promise with actual doc
+      return ydoc
     }
-    s.add(id);
-    if (s.size > SEEN_LIMIT) {
-      // approx LRU by dropping the first N (iteration order in Set is insertion)
-      const drop = Math.floor(SEEN_LIMIT / 4);
-      let n = 0;
-      for (const v of s) {
-        s.delete(v);
-        if (++n >= drop) break;
-      }
+    const existing = ydocs.get(roomId)
+    // Handle case where it's still a promise
+    if (existing instanceof Promise) {
+      return await existing
     }
-  };
-  const isSeen = (topic, id) => {
-    const s = seenMsg.get(topic);
-    return s ? s.has(id) : false;
-  };
-
-  const getSubsFor = (topic) => {
-    try {
-      return libp2p?.services?.pubsub?.getSubscribers?.(topic) ?? [];
-    } catch {
-      return [];
-    }
-  };
-
-  function scheduleFlush(topic) {
-    const entry = outbox.get(topic);
-    if (!entry || entry.timer) return;
-    const delay =
-      Math.min(BASE_MS * Math.pow(2, entry.attempts || 0), MAX_BACKOFF_MS) +
-      Math.floor(Math.random() * 200);
-    entry.timer = setTimeout(async () => {
-      entry.timer = null;
-      // Flush all queued messages in order
-      while (entry.queue.length) {
-        const msg = entry.queue.shift();
-        try {
-          await libp2p.services.pubsub.publish(topic, enc(msg));
-        } catch {
-          // put it back and retry later
-          entry.queue.unshift(msg);
-          entry.attempts = Math.min((entry.attempts || 0) + 1, 8);
-          break;
-        }
-      }
-      if (entry.queue.length) scheduleFlush(topic);
-      else entry.attempts = 0;
-    }, delay);
-  }
-
-  // Nudge the outbox whenever new peers connect.
-  if (libp2p?.addEventListener) {
-    libp2p.addEventListener("peer:connect", () => {
-      for (const topic of outbox.keys()) scheduleFlush(topic);
-    });
-  }
-
-  async function waitForSubs(topic, timeoutMs = 3000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      try {
-        const s = libp2p?.services?.pubsub?.getSubscribers?.(topic) || [];
-        if (s.length > 0) return true;
-      } catch {}
-      await new Promise((r) => setTimeout(r, 120));
-    }
-    return false;
+    return existing
   }
 
   /**
-   * Publish with msgId/ttl defaults. If there are no subs yet, enqueue.
-   * @param {string} roomId
-   * @param {RoomMessage} msg
+   * Subscribe to non-CRDT messages (file requests, etc)
+   */
+  function subscribe(roomId, handler) {
+    const topic = ROOM_TOPIC(roomId)
+
+    let set = handlers.get(roomId)
+    if (!set) {
+      set = new Set()
+      handlers.set(roomId, set)
+    }
+    set.add(handler)
+
+    const messageHandler = (evt) => {
+      if (evt.detail.topic !== topic) return
+      try {
+        const msg = dec(evt.detail.data)
+        // Let Y.js messages be handled by ydoc
+        if (msg.type?.startsWith('Y_') || msg.type?.startsWith('SYNC_')) return
+        // Call custom handlers for everything else
+        for (const fn of set) fn(msg)
+      } catch {}
+    }
+
+    // Subscribe to topic if not already
+    try {
+      libp2p.services?.pubsub?.subscribe(topic)
+      libp2p.services?.pubsub?.addEventListener('message', messageHandler)
+    } catch {}
+
+    return () => {
+      set.delete(handler)
+      if (set.size === 0) {
+        handlers.delete(roomId)
+        try {
+          libp2p.services?.pubsub?.removeEventListener('message', messageHandler)
+          libp2p.services?.pubsub?.unsubscribe(topic)
+        } catch {}
+      }
+    }
+  }
+
+  /**
+   * Simple publish helper
    */
   async function publish(roomId, msg) {
-    const topic = ROOM_TOPIC(roomId);
-    // normalize metadata
-    if (!msg.msgId) {
-      msg.msgId =
-        (globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)) +
-        "-" +
-        Date.now().toString(36);
-    }
-    if (typeof msg.ttl !== "number") {
-      // Disable application-level rebroadcast by default; pubsub handles propagation.
-      msg.ttl = 0;
-    }
-    if (libp2p?.services?.pubsub) {
-      try {
-        await libp2p.services.pubsub.publish(topic, enc(msg));
-      } catch {
-        // enqueue + backoff if publish throws
-        let entry = outbox.get(topic);
-        if (!entry) {
-          entry = { queue: [], attempts: 0, timer: null };
-          outbox.set(topic, entry);
-        }
-        entry.queue.push(msg);
-        scheduleFlush(topic);
-      }
-    } else {
-      let bc = bcMap.get(topic);
-      if (!bc) {
-        bc = new BroadcastChannel(topic);
-        bcMap.set(topic, bc);
-      }
-      bc.postMessage(enc(msg));
+    const topic = ROOM_TOPIC(roomId)
+    try {
+      await libp2p.services?.pubsub?.publish(topic, enc({ ...msg, roomId }))
+    } catch (err) {
+      console.warn('Publish failed:', err)
     }
   }
 
-  function ensureTopicListener(roomId) {
-    if (topicHandlers.has(roomId)) return;
-    const topic = ROOM_TOPIC(roomId);
-    if (libp2p?.services?.pubsub) {
-      /** @param {CustomEvent} evt */
-      const handler = (evt) => {
-        if (evt.detail.topic !== topic) return;
-        const fns = subs.get(roomId);
-        if (!fns?.size) return;
-        try {
-          /** @type {RoomMessage} */
-          const m = dec(evt.detail.data);
-          if (!m?.msgId) return;
-          if (isSeen(topic, m.msgId)) return;
-          rememberSeen(topic, m.msgId);
-          for (const fn of fns) fn(m, evt.detail);
-        } catch {}
-      };
-      libp2p.services.pubsub.subscribe(topic);
-      libp2p.services.pubsub.addEventListener("message", handler);
-      topicHandlers.set(roomId, { handler, count: 0 });
-    } else {
-      let bc = bcMap.get(topic);
-      if (!bc) {
-        bc = new BroadcastChannel(topic);
-        bcMap.set(topic, bc);
-      }
-      const handler = (ev) => {
-        const fns = subs.get(roomId);
-        if (!fns?.size) return;
-        try {
-          /** @type {RoomMessage} */
-          const m = dec(ev.data);
-          for (const fn of fns) fn(m, { from: "local" });
-        } catch {}
-      };
-      bc.addEventListener("message", handler);
-      topicHandlers.set(roomId, { handler, count: 0 });
-    }
-  }
-
-  function subscribe(roomId, onMessage) {
-    ensureTopicListener(roomId);
-    let set = subs.get(roomId);
-    if (!set) {
-      set = new Set();
-      subs.set(roomId, set);
-    }
-    set.add(onMessage);
-    const t = topicHandlers.get(roomId);
-    if (t) t.count++;
-    return () => unsubscribe(roomId, onMessage);
-  }
-
-  function unsubscribe(roomId, fn) {
-    const topic = ROOM_TOPIC(roomId);
-    const set = subs.get(roomId);
-    if (set) {
-      if (fn) set.delete(fn);
-      else set.clear();
-      if (set.size === 0) {
-        subs.delete(roomId);
-        const th = topicHandlers.get(roomId);
-        if (th) {
-          if (libp2p?.services?.pubsub) {
-            libp2p.services.pubsub.removeEventListener("message", th.handler);
-            libp2p.services.pubsub.unsubscribe(topic);
-          } else {
-            const bc = bcMap.get(topic);
-            bc?.removeEventListener("message", th.handler);
-          }
-          topicHandlers.delete(roomId);
-        }
-      }
-    }
-  }
-
-  async function sendHello(roomId) {
-    await publish(roomId, {
-      type: "HELLO",
-      roomId,
-      from: libp2p.peerId.toString(),
-    });
-  }
-
-  async function sendManifest(roomId, manifest) {
-    await publish(roomId, { type: "MANIFEST", roomId, manifest });
-  }
-
+  /**
+   * Request files from peers (hint for bitswap)
+   */
   async function requestFiles(roomId, fileCids) {
     await publish(roomId, {
-      type: "REQUEST",
-      roomId,
-      fileCids,
-      from: libp2p.peerId.toString(),
-      ttl: 0, // don't fan this out
-    });
+      type: 'FILE_REQUEST',
+      cids: fileCids,
+      from: libp2p.peerId.toString()
+    })
   }
 
-  async function sendAck(roomId, info) {
-    await publish(roomId, { type: "ACK", roomId, info });
-  }
-
+  /**
+   * Send chat message via Y.js
+   */
   async function sendChat(roomId, text, msgId) {
-    const from = libp2p?.peerId?.toString?.() || "anon";
-    // Fire-and-forget; outbox/backoff handles delivery
-    publish(roomId, { type: "CHAT", roomId, text, from, ts: Date.now(), ttl: 0, msgId }).catch(() => {});
+    const ydoc = await getYDoc(roomId)
+    const from = libp2p?.peerId?.toString?.() || 'anon'
+
+    addChatMsg(ydoc.chat, {
+      text,
+      from,
+      ts: Date.now(),
+      msgId: msgId || crypto.randomUUID()
+    })
   }
 
-  // If invite included ?host= and ?tracker=, dial the host immediately via the tracker relay.
-  async function tryDialHostFromInvite() {
-    try {
-      if (!libp2p?.dial) return;
-      const sp = new URLSearchParams(globalThis.location?.search || "");
-      const host = sp.get("host");
-      const tr = sp.get("tracker");
-      if (!host || !tr) return;
-      const base = decodeURIComponent(tr); // ends with /p2p/<relayPeerId>
-      const ma = `${base}/p2p-circuit/p2p/${host}`;
-      await libp2p.dial(ma);
-    } catch {}
+  /**
+   * Update manifest via Y.js
+   */
+  async function setManifest(roomId, manifest) {
+    const ydoc = await getYDoc(roomId)
+    updateManifest(ydoc.manifest, manifest)
   }
 
-  function attachHost(room) {
-    const { id: roomId, manifest } = room;
-    subscribe(roomId, async (msg) => {
-      updateRoomLastSeen(roomId);
-      switch (msg.type) {
-        case "HELLO":
-          await sendManifest(roomId, manifest);
-          break;
-        case "REQUEST":
-          for (const cidStr of msg.fileCids) {
+  /**
+   * Get current manifest from Y.js
+   */
+  async function getManifest(roomId) {
+    const ydoc = await getYDoc(roomId)
+    const files = ydoc.manifest.get('files') || []
+    return {
+      files: files.map(f => ({ ...f })),
+      updatedAt: ydoc.manifest.get('updatedAt') || Date.now()
+    }
+  }
+
+  /**
+   * Unified join method - handles both host and joiner cases
+   * @param {string} roomId
+   * @param {Object=} options
+   * @param {any=} options.manifest - Initial manifest (host only)
+   * @param {Function=} options.onManifestUpdate - Callback when manifest changes
+   * @param {Function=} options.onNewFiles - Callback when new files appear
+   */
+  async function join(roomId, options = {}) {
+    const { manifest, onManifestUpdate, onNewFiles } = options
+    const ydoc = await getYDoc(roomId)
+
+    // If we've already joined, just return (but allow re-attaching observers)
+    const alreadyJoined = joinedRooms.has(roomId)
+    if (alreadyJoined) {
+      console.log(`[Room ${roomId.slice(0,6)}] Already joined, re-attaching observers only`)
+    } else {
+      console.log(`[Room ${roomId.slice(0,6)}] Joining...`)
+      joinedRooms.add(roomId)
+    }
+
+    // If we have a manifest, we're the host - set it (only on first join)
+    if (manifest && !alreadyJoined) {
+      console.log(`[Room ${roomId.slice(0,6)}] Setting initial manifest (${manifest.files.length} files)`)
+      updateManifest(ydoc.manifest, manifest)
+    }
+
+    // Watch for manifest changes (can be attached multiple times if needed)
+    if (onManifestUpdate) {
+      const observer = () => {
+        const files = ydoc.manifest.get('files') || []
+        console.log(`[Room ${roomId.slice(0,6)}] Manifest changed: ${files.length} files`)
+        onManifestUpdate({
+          files: files.map(f => ({ ...f })),
+          updatedAt: ydoc.manifest.get('updatedAt') || Date.now()
+        })
+      }
+      ydoc.manifest.observe(observer)
+      // Trigger initial callback if there's already data
+      observer()
+    }
+
+    // Watch for new files (auto-pin)
+    if (onNewFiles) {
+      let prevFiles = new Set((ydoc.manifest.get('files') || []).map(f => f.cid))
+      const observer = () => {
+        const files = ydoc.manifest.get('files') || []
+        const currentFiles = new Set(files.map(f => f.cid))
+        const newCids = [...currentFiles].filter(cid => !prevFiles.has(cid))
+        if (newCids.length > 0) {
+          console.log(`[Room ${roomId.slice(0,6)}] New files detected: ${newCids.length}`)
+          onNewFiles(newCids)
+          prevFiles = currentFiles
+        }
+      }
+      ydoc.manifest.observe(observer)
+    }
+
+    // Handle file requests (for all peers) - only on first join
+    if (!alreadyJoined) {
+      subscribe(roomId, async (msg) => {
+        if (msg.type === 'FILE_REQUEST') {
+          console.log(`[Room ${roomId.slice(0,6)}] File request for ${msg.cids?.length} CIDs`)
+          for (const cid of msg.cids || []) {
             try {
-              for await (const _ of helia.pin.add(cidStr)) {
-              }
+              for await (const _ of helia.pin.add(cid)) {}
             } catch {}
           }
-          await sendAck(roomId, { ok: true, pinned: msg.fileCids.length });
-          break;
-      }
-    });
-    // Re-announce manifest a few times with mild exponential backoff
-    let bursts = 0;
-    const rebroadcast = async () => {
-      if (bursts >= 4) return;
-      bursts++;
-      sendManifest(roomId, manifest).catch(() => {});
-      const delay = Math.min(600 * Math.pow(1.5, bursts), 4000) + Math.floor(Math.random() * 200);
-      setTimeout(rebroadcast, delay);
-    };
-    setTimeout(rebroadcast, 600 + Math.floor(Math.random() * 200));
+        }
+      })
+    }
+
+    return ydoc
   }
 
-  function attachJoin(roomId, onManifest) {
-    // Be aggressive: connect to the host right away using the relay in the invite.
-    tryDialHostFromInvite().catch(() => {});
-    let gotManifest = false;
-    subscribe(roomId, async (msg) => {
-      updateRoomLastSeen(roomId);
-      if (msg.type === "MANIFEST" && msg.manifest) {
-        gotManifest = true;
-        // Bubble to UI; store persistence handled upstream
-        onManifest(msg.manifest);
-      }
-    });
-    // Retry HELLO with backoff until we see a MANIFEST (bounded).
-    let attempts = 0;
-    const helloTick = async () => {
-      if (gotManifest || attempts >= 8) return;
-      attempts++;
-      sendHello(roomId).catch(() => {});
-      const delay = Math.min(400 * Math.pow(1.6, attempts), 5000);
-      setTimeout(helloTick, delay);
-    };
-    helloTick();
+  /**
+   * Destroy a room's Y.Doc
+   */
+  function destroyRoom(roomId) {
+    const ydoc = ydocs.get(roomId)
+    if (ydoc && typeof ydoc.destroy === 'function') {
+      ydoc.destroy()
+    }
+    ydocs.delete(roomId)
+    handlers.delete(roomId)
+    joinedRooms.delete(roomId)
   }
 
   return {
-    publish,
+    getYDoc,
     subscribe,
-    unsubscribe,
-    sendHello,
-    sendManifest,
+    publish,
     requestFiles,
-    sendAck,
     sendChat,
-    attachHost,
-    attachJoin,
-  };
+    setManifest,
+    getManifest,
+    join,
+    destroyRoom
+  }
 }

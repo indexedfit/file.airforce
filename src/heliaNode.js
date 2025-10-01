@@ -14,10 +14,12 @@ import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import { bootstrap } from "@libp2p/bootstrap";
 import { inspectorMetrics } from "@ipshipyard/libp2p-inspector-metrics";
 import { createOPFSBlockstore } from "./opfs-blockstore.js";
+import { BlockstoreMonitor } from "./blockstore-monitor.js";
 import { PUBSUB_PEER_DISCOVERY, TRACKERS } from "./constants.js";
 
 export async function startHelia() {
-  const blockstore = await createOPFSBlockstore("wc-blocks");
+  const baseBlockstore = await createOPFSBlockstore("wc-blocks");
+  const blockstore = new BlockstoreMonitor(baseBlockstore);
 
   // special case for invite via 'tracker' (relay?)
   // use tracker(s) from invite URL when present so all participants share the same relay
@@ -35,11 +37,9 @@ export async function startHelia() {
   const libp2p = await createLibp2p({
     metrics: inspectorMetrics(),
     addresses: { listen: ["/p2p-circuit", "/webrtc"] },
-    // Reserve on discovered relays so others can dial us via /p2p-circuit
     transports: [webSockets(), webTransport(), webRTC(), circuitRelayTransport({ discoverRelays: 2 })],
     connectionEncrypters: [noise()],
-    // Balanced defaults
-    connectionManager: { maxConnections: 29, autoDial: true },
+    connectionManager: { maxConnections: 50, autoDial: true },
     streamMuxers: [yamux()],
     connectionGater: {
       denyDialMultiaddr: async () => false,
@@ -49,7 +49,6 @@ export async function startHelia() {
       pubsubPeerDiscovery({ interval: 3_000, topics: [PUBSUB_PEER_DISCOVERY] }),
     ],
     services: {
-      // No-throw publish while the mesh is still forming
       pubsub: gossipsub({ allowPublishToZeroPeers: true }),
       identify: identify(),
     },
@@ -70,10 +69,5 @@ export async function startHelia() {
   // Start Helia (starts its libp2p internally)
   if (typeof helia.start === "function") await helia.start();
 
-  // Make sure we are connected to our relays (establish/refresh reservations)
-  try {
-    await Promise.allSettled((TRACKERS_ACTIVE || []).map((ma) => libp2p.dial(ma)));
-  } catch {}
-
-  return { helia, fs, libp2p };
+  return { helia, fs, libp2p, blockstore };
 }

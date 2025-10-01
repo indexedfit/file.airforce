@@ -24,6 +24,7 @@ export default function App() {
             </button>
           </div>
         </div>
+        <div id="bitswap-status" className="hidden bg-blue-50 border-t px-4 py-2 text-xs text-blue-700"></div>
         <div id="peer-info-panel" className="hidden border-t">
           <div className="container mx-auto px-4 py-3">
             <div className="grid md:grid-cols-3 gap-3">

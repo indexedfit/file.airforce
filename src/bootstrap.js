@@ -13,10 +13,7 @@ import {
   showCreateRoomPanel,
   showUploadProgress,
   updateProgress,
-  // showFetchProgress is implemented locally below
   renderRoomsList,
-  renderRoomDetails,
-  renderChatMessages,
 } from "./ui.js";
 import {
   saveDrop,
@@ -24,18 +21,16 @@ import {
   saveRoom,
   getRoom,
   getRooms,
-  getChat,
-  addChatMessage,
 } from "./store.js";
 import { TRACKERS, TRACKER_CONTROL, CONTENT_TOPIC } from "./constants.js";
 import { listAddresses, countPeerTypes, peerDetails } from "./peers.js";
+import { addFilesAndCreateManifest, formatBytes } from "./file-manager.js";
+import { RoomUI } from "./room-ui.js";
 
 const $ = (id) => document.getElementById(id);
 
-let helia, fs, libp2p, rooms;
-let activeRoomId = null;
-let chatUnsub = null;
-let roomMsgsUnsub = null;
+let helia, fs, libp2p, rooms, blockstore;
+let roomUI;
 
 function urlFlag(name) {
   return new URLSearchParams(location.search).has(name);
@@ -54,7 +49,6 @@ async function startHeliaMaybeFake() {
     };
     const fakeFs = {
       async addBytes(bytes) {
-        // pseudo CID: bafk + base36 length + random
         return {
           toString: () =>
             `bafk${bytes.length.toString(36)}${Math.random()
@@ -63,74 +57,21 @@ async function startHeliaMaybeFake() {
         };
       },
     };
-    // Pin API shim
-    fake.pin = { add: async function* () { } };
-    return { helia: fake, fs: fakeFs, libp2p: fake.libp2p };
+    fake.pin = { add: async function* () {} };
+    const fakeBlockstore = {
+      on: () => {},
+      stats: { blocksReceived: 0, blocksSent: 0 },
+    };
+    return { helia: fake, fs: fakeFs, libp2p: fake.libp2p, blockstore: fakeBlockstore };
   }
   return startHelia();
 }
 
-async function addFilesAndCreateManifest(files) {
-  const manifest = { files: [], seq: Date.now(), updatedAt: Date.now() };
-  let done = 0;
-  showUploadProgress(true);
-  try {
-    for (const f of files) {
-      const data = new Uint8Array(await f.arrayBuffer());
-      const cid = await fs.addBytes(data);
-      manifest.files.push({ name: f.name, size: f.size, cid: cid.toString() });
-      done++;
-      updateProgress(
-        Math.round((done / files.length) * 100),
-        `${done}/${files.length}`
-      );
-    }
-    return manifest;
-  } finally {
-    showUploadProgress(false);
-  }
-}
-
-// ------- Small helpers for file open/download + progress -------
 function showFetchProgress(show, loaded = 0, total = 0, label = "") {
   showUploadProgress(show);
-  const pct = total > 0 ? Math.round((loaded / total) * 100) : loaded > 0 ? 5 + (loaded % 50) : 0;
+  const pct =
+    total > 0 ? Math.round((loaded / total) * 100) : loaded > 0 ? 5 + (loaded % 50) : 0;
   updateProgress(pct, label);
-}
-
-function guessMime(name = "") {
-  const ext = (name.split(".").pop() || "").toLowerCase();
-  const map = {
-    pdf: "application/pdf",
-    png: "image/png",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    gif: "image/gif",
-    webp: "image/webp",
-    txt: "text/plain",
-    json: "application/json",
-    html: "text/html",
-    md: "text/markdown",
-    mp4: "video/mp4",
-    webm: "video/webm",
-    mp3: "audio/mpeg",
-    wav: "audio/wav",
-    ogg: "audio/ogg",
-    csv: "text/csv",
-  };
-  return map[ext] || "application/octet-stream";
-}
-
-async function fetchFileAsBlob(cid, name, onProgress = () => { }) {
-  let total = 0; // unknown by default; we could wire from manifest later
-  const parts = [];
-  let loaded = 0;
-  for await (const chunk of fs.cat(cid)) {
-    parts.push(chunk);
-    loaded += chunk.length || chunk.byteLength || 0;
-    onProgress(loaded, total);
-  }
-  return new Blob(parts, { type: guessMime(name) });
 }
 
 function randId() {
@@ -194,7 +135,7 @@ function buildInviteURL(roomId) {
   u.searchParams.set("view", "rooms");
   u.searchParams.set("room", roomId);
   u.searchParams.set("host", helia.libp2p.peerId.toString());
-  const tr = (globalThis.wcInviteExtras && globalThis.wcInviteExtras.tracker) || TRACKERS?.[0] || "";
+  const tr = globalThis.wcInviteExtras?.tracker || TRACKERS?.[0] || "";
   if (tr) u.searchParams.set("tracker", encodeURIComponent(tr));
   return u.toString();
 }
@@ -213,24 +154,82 @@ function showInvite(link) {
   });
 }
 
+function updateBitswapStatus(status) {
+  const el = document.getElementById("bitswap-status");
+  if (el) {
+    el.textContent = status;
+    el.classList.remove("hidden");
+  }
+}
+
+function enc(obj) {
+  return new TextEncoder().encode(JSON.stringify(obj));
+}
+
+async function announceToTracker(roomId, manifest) {
+  try {
+    const cids = (manifest?.files || []).map((f) => f.cid).filter(Boolean);
+    if (!cids.length) return;
+    await libp2p.services.pubsub.publish(
+      TRACKER_CONTROL,
+      enc({
+        type: "TRACKER_ANNOUNCE",
+        roomId,
+        fileCids: cids,
+        host: libp2p.peerId.toString(),
+        ts: Date.now(),
+      })
+    );
+    await libp2p.services.pubsub.publish(CONTENT_TOPIC, enc({ roomId, cids }));
+  } catch (e) {
+    console.warn("tracker announce failed", e?.message);
+  }
+}
+
 export async function startUI() {
-  ({ helia, fs, libp2p } = await startHeliaMaybeFake());
+  ({ helia, fs, libp2p, blockstore } = await startHeliaMaybeFake());
   rooms = createRoomManager(helia, fs);
 
-  // expose extras so UI helpers (no direct libp2p import) can add them to URLs
-  // todo doublecheck.
+  // Initialize room UI manager
+  roomUI = new RoomUI({
+    rooms,
+    fs,
+    libp2p,
+    helia,
+    onProgress: showFetchProgress,
+  });
+
+  // Monitor bitswap activity
+  if (blockstore?.on) {
+    blockstore.on("block:get", (event, data) => {
+      console.log(
+        `📦 Block received: ${data.cid.slice(0, 12)}... (${data.size} bytes, ${data.duration}ms)`
+      );
+      const status = `Blocks: ${data.stats.blocksReceived} received, ${
+        data.stats.blocksSent
+      } sent | ${formatBytes(data.stats.bytesReceived)} ↓`;
+      updateBitswapStatus(status);
+    });
+  }
+
+  // Store invite extras globally for URL building
   const sp0 = new URLSearchParams(location.search);
   globalThis.wcInviteExtras = {
     host: libp2p.peerId.toString(),
-    tracker: sp0.get("tracker") ? decodeURIComponent(sp0.get("tracker")) : (TRACKERS?.[0] || ""),
+    tracker: sp0.get("tracker")
+      ? decodeURIComponent(sp0.get("tracker"))
+      : TRACKERS?.[0] || "",
   };
 
   setPeerId(libp2p.peerId.toString());
-  // Participate in content/control topics (simple and clean)
+
+  // Subscribe to content/control topics (peer discovery is automatic)
   try {
     libp2p.services?.pubsub?.subscribe?.(CONTENT_TOPIC);
     libp2p.services?.pubsub?.subscribe?.(TRACKER_CONTROL);
-  } catch { }
+  } catch {}
+
+  // Update peer info periodically
   setInterval(() => {
     setConnCount(libp2p.getConnections().length);
     renderAddresses(listAddresses(libp2p));
@@ -243,12 +242,13 @@ export async function startUI() {
   bindNavLinks();
   renderView();
   renderRoomsIfActive();
-  // Peer info collapsible panel toggle
+
+  // Peer info toggle
   const toggle = document.getElementById("peer-info-toggle");
   const panel = document.getElementById("peer-info-panel");
   if (toggle && panel) toggle.onclick = () => panel.classList.toggle("hidden");
 
-  // Global error handlers to avoid silent failures
+  // Global error handlers
   window.addEventListener("unhandledrejection", (e) => {
     console.error("Unhandled rejection", e.reason);
     toast(e?.reason?.message || "Unexpected error");
@@ -258,12 +258,11 @@ export async function startUI() {
     toast(e?.error?.message || e.message || "Error");
   });
 
+  // File upload UI
   const dropzone = $("dropzone");
   const fileInput = $("file-input");
   const browse = $("btn-browse");
-  const createRoomBtn = $("btn-create-room");
 
-  // Keep selected files in state; don't assign to input.files (read-only in many browsers)
   let selectedFiles = [];
   function renderSelectedFiles() {
     const panel = $("selected-files-panel");
@@ -285,9 +284,7 @@ export async function startUI() {
         renderSelectedFiles();
       };
       li.append(name, rm);
-      const frag2 = document.createDocumentFragment();
-      frag2.appendChild(li);
-      frag.appendChild(frag2);
+      frag.appendChild(li);
     });
     ul.replaceChildren(frag);
   }
@@ -298,8 +295,8 @@ export async function startUI() {
     dropzone.classList.add("bg-white");
   };
   dropzone.ondragleave = () => dropzone.classList.remove("bg-white");
+
   async function handleSelectedFiles(files) {
-    // append (dedupe by name+size+lastModified for UX)
     const key = (f) => `${f.name}:${f.size}:${f.lastModified ?? 0}`;
     const seen = new Set(selectedFiles.map(key));
     for (const f of Array.from(files || [])) {
@@ -312,7 +309,7 @@ export async function startUI() {
     showCreateRoomPanel(selectedFiles.length > 0);
     renderSelectedFiles();
 
-    // Auto-create room+drop unless we’re in a join context
+    // Auto-create room if not joining
     if (!isJoinContext() && selectedFiles.length) {
       await autoCreateDropAndRoom();
     }
@@ -325,8 +322,6 @@ export async function startUI() {
   };
   fileInput.onchange = () => handleSelectedFiles(fileInput.files);
 
-  let lastManifest = null;
-  let lastRoom = null;
   let creationInFlight = false;
 
   function isJoinContext() {
@@ -339,22 +334,27 @@ export async function startUI() {
     creationInFlight = true;
     try {
       toast(`Adding ${selectedFiles.length} file(s)…`);
-      const manifest = await addFilesAndCreateManifest(selectedFiles);
-      lastManifest = manifest;
-      const defaultName = $("drop-name")?.value?.trim() || randomSlug();
+      const manifest = await addFilesAndCreateManifest(fs, selectedFiles, (done, total) => {
+        showUploadProgress(true);
+        updateProgress(Math.round((done / total) * 100), `${done}/${total}`);
+      });
+      showUploadProgress(false);
 
+      const defaultName = $("drop-name")?.value?.trim() || randomSlug();
       const drop = {
         id: randId(),
         name: defaultName,
         createdAt: Date.now(),
         files: manifest.files,
       };
+
+      // Pin files locally
       for (const f of manifest.files) {
         try {
-          for await (const _ of helia.pin.add(f.cid)) {
-          }
-        } catch { }
+          for await (const _ of helia.pin.add(f.cid)) {}
+        } catch {}
       }
+
       const room = {
         id: randId(),
         name: $("room-name")?.value?.trim() || defaultName,
@@ -364,16 +364,15 @@ export async function startUI() {
 
       saveDrop({ ...drop, roomId: room.id });
       saveRoom(room);
-      rooms.attachHost(room);
 
-      // Proactively announce files so joiners see them immediately
-      rooms.sendManifest(room.id, manifest).catch(() => { });
-      // Ask tracker to subscribe + pin
-      announceToTracker(room.id, manifest).catch(() => { });
+      // Join as host
+      rooms.join(room.id, { manifest });
 
-      lastRoom = room;
+      announceToTracker(room.id, manifest).catch(() => {});
+
       renderDrops(getDrops().slice(0, 5), "drops-list");
-      // Navigate with host/tracker in URL; keep QR/share ready
+
+      // Navigate to room
       const extras = { room: room.id, host: libp2p.peerId.toString() };
       if (TRACKERS?.length) extras.tracker = encodeURIComponent(TRACKERS[0]);
       goto("rooms", extras);
@@ -382,8 +381,7 @@ export async function startUI() {
         tracker: TRACKERS?.[0] || "",
       };
 
-      activeRoomId = room.id;
-      renderRoomsIfActive();
+      await renderRoomsIfActive();
       showInvite(buildInviteURL(room.id));
       toast("Room created and files pinned locally");
     } catch (err) {
@@ -394,20 +392,10 @@ export async function startUI() {
     }
   }
 
-  if (createRoomBtn) {
-    createRoomBtn.onclick = async () => {
-      if (!selectedFiles.length) {
-        toast("Select files first");
-        return;
-      }
-      await autoCreateDropAndRoom();
-    };
-  }
-
-
   renderDrops(getDrops().slice(0, 5), "drops-list");
   renderDrops(getDrops(), "drops-list-full");
 
+  // Join room button
   const joinBtn = $("btn-join-room");
   if (joinBtn) {
     joinBtn.onclick = async () => {
@@ -418,7 +406,7 @@ export async function startUI() {
       try {
         const u = new URL(input);
         roomId = u.searchParams.get("room") || input;
-      } catch { }
+      } catch {}
       const existing = getRoom(roomId);
       if (!existing)
         saveRoom({
@@ -426,304 +414,130 @@ export async function startUI() {
           name: `Room ${roomId.slice(0, 6)}`,
           createdAt: Date.now(),
         });
-      rooms.attachJoin(roomId, (manifest) => {
-        saveRoom({ id: roomId, manifest });
-        renderRoomsIfActive();
+
+      await rooms.join(roomId, {
+        onManifestUpdate: async (manifest) => {
+          saveRoom({ id: roomId, manifest });
+          await renderRoomsIfActive();
+        },
       });
+
       goto("rooms", { room: roomId });
-      activeRoomId = roomId;
-      renderRoomsIfActive();
+      await renderRoomsIfActive();
       toast(`Joined room ${roomId}`);
     };
   }
 
-  // ---------- Rooms view controller ----------
-  function bindRoomButtons(roomId) {
-    const roomsInfo = $("rooms-info");
-    // No more "Request & Mirror" intermediary; mirroring occurs automatically on MANIFEST
+  // Handle adding files to existing room
+  async function handleRoomFiles(roomId, files) {
+    const arr = Array.from(files || []);
+    if (!arr.length) return;
+    try {
+      const added = await addFilesAndCreateManifest(fs, arr, (done, total) => {
+        showUploadProgress(true);
+        updateProgress(Math.round((done / total) * 100), `${done}/${total}`);
+      });
+      showUploadProgress(false);
 
-    // File open/download actions (event delegation)
-    const filesUl = document.getElementById("room-files");
-    if (filesUl) {
-      filesUl.onclick = async (e) => {
-        const target = e.target.closest("button[data-action]");
-        if (!target) {
-          // plain click -> selection
-          const li = e.target.closest('li[data-idx]')
-          if (!li) return;
-          filesUl.querySelectorAll('li').forEach(n => n.classList.remove('is-selected'))
-          li.classList.add('is-selected')
-          return;
-        }
-        const action = target.dataset.action;
-        const cid = target.dataset.cid;
-        const name = target.dataset.name || "file";
-        if (!cid) return;
-        try {
-          showFetchProgress(true, 0, 0, action === "open-file" ? "Opening…" : "Downloading…");
-          const blob = await fetchFileAsBlob(cid, name, (loaded, total) => {
-            showFetchProgress(true, loaded, total, `${loaded} bytes`);
-          });
-          const url = URL.createObjectURL(blob);
-          if (action === "open-file") {
-            window.open(url, "_blank");
-            setTimeout(() => URL.revokeObjectURL(url), 60_000);
-          } else if (action === "download-file") {
-            const a = document.createElement("a");
-            a.href = url;
-            a.download = name || cid;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(() => URL.revokeObjectURL(url), 10_000);
-          }
-        } catch (err) {
-          console.error(err);
-          toast("Failed to fetch file");
-        } finally {
-          showFetchProgress(false);
-        }
-      };
-      filesUl.ondblclick = () => {
-        const li = filesUl.querySelector('li.is-selected') || filesUl.querySelector('li[data-idx="0"]')
-        if (!li) return;
-        const btn = li.querySelector('button[data-action="open-file"]')
-        btn?.click()
-      }
-      filesUl.onkeydown = (e) => {
-        const tag = (e.target?.tagName || '').toLowerCase()
-        if (tag === 'input' || tag === 'textarea') return;
-        if (!['ArrowDown','ArrowUp','Enter'].includes(e.key)) return;
-        e.preventDefault()
-        const items = Array.from(filesUl.querySelectorAll('li[data-idx]'))
-        if (!items.length) return;
-        let idx = items.findIndex(n => n.classList.contains('is-selected'))
-        if (idx < 0) idx = 0
-        if (e.key === 'ArrowDown') idx = Math.min(items.length - 1, idx + 1)
-        if (e.key === 'ArrowUp') idx = Math.max(0, idx - 1)
-        items.forEach(n => n.classList.remove('is-selected'))
-        const sel = items[idx]
-        sel.classList.add('is-selected')
-        sel.focus()
-        if (e.key === 'Enter') {
-          const btn = sel.querySelector('button[data-action="open-file"]')
-          btn?.click()
-        }
-      }
-      // initialize selection
-      queueMicrotask(() => {
-        const first = filesUl.querySelector('li[data-idx="0"]')
-        if (first) first.classList.add('is-selected')
-      })
-    }
+      const cur = getRoom(roomId)?.manifest || { files: [] };
+      const byCid = new Map(cur.files.map((f) => [f.cid, f]));
+      for (const f of added.files) byCid.set(f.cid, f);
+      const merged = { files: [...byCid.values()], updatedAt: Date.now() };
 
-    const input = document.getElementById("chat-input");
-    const send = document.getElementById("btn-chat-send");
-    if (send && input) {
-      const sendNow = async () => {
-        const text = input.value.trim();
-        if (!text) return;
-        // Local echo immediately; network send is fire-and-forget (room outbox handles backoff)
-        const mid = newMsgId();
-        addChatMessage(roomId, {
-          type: "CHAT",
-          roomId,
-          text,
-          from: libp2p.peerId.toString(),
-          ts: Date.now(),
-          msgId: mid,
-        });
-        rooms.sendChat(roomId, text, mid).catch(() => { });
-        input.value = "";
-        renderChatMessages(getChat(roomId), libp2p.peerId.toString());
-      };
-      send.onclick = sendNow;
-      input.onkeydown = (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          sendNow();
-        }
-      };
-    }
-
-    // Room-level copy link button
-    const copyBtn = document.getElementById("btn-copy-room-link");
-    if (copyBtn) {
-      copyBtn.onclick = () => {
-        try {
-          const link = buildInviteURL(roomId);
-          navigator.clipboard.writeText(link).then(() => toast("Link copied"));
-        } catch (e) {
-          console.error(e);
-          toast("Failed to copy link");
-        }
-      };
-    }
-
-    // ---- Add-files-to-room (immediate add, no second click) ----
-    const rDrop = document.getElementById("room-dropzone");
-    const rInput = document.getElementById("room-file-input");
-    const rBrowse = document.getElementById("btn-room-browse");
-    async function handleRoomFiles(files) {
-      const arr = Array.from(files || []);
-      if (!arr.length) return;
-      try {
-        const added = await addFilesAndCreateManifest(arr);
-        const cur = getRoom(roomId)?.manifest || { files: [], seq: 0 };
-        const byCid = new Map(cur.files.map((f) => [f.cid, f]));
-        for (const f of added.files) byCid.set(f.cid, f);
-        const merged = { files: [...byCid.values()], seq: Math.max(cur.seq || 0, Date.now()) + 1, updatedAt: Date.now() };
-        saveRoom({ id: roomId, manifest: merged });
-        rooms.sendManifest(roomId, merged).catch(() => { });
-        announceToTracker(roomId, merged).catch(() => { });
-        for (const f of added.files) { try { for await (const _ of helia.pin.add(f.cid)) { } } catch { } }
-        renderRoomsIfActive();
-        toast("Files added to room");
-      } catch (e) {
-        console.error(e);
-        toast("Failed to add files");
-      }
-    }
-    if (rBrowse && rInput) rBrowse.onclick = () => rInput.click();
-    if (rInput) rInput.onchange = () => handleRoomFiles(rInput.files);
-    if (rDrop) {
-      rDrop.ondragover = (e) => { e.preventDefault(); rDrop.classList.add("bg-gray-100"); };
-      rDrop.ondragleave = () => rDrop.classList.remove("bg-gray-100");
-      rDrop.ondrop = (e) => {
-        e.preventDefault();
-        rDrop.classList.remove("bg-gray-100");
-        handleRoomFiles(e.dataTransfer.files);
-      };
-    }
-  }
-
-  function subscribeChat(roomId) {
-    if (chatUnsub) {
-      chatUnsub();
-      chatUnsub = null;
-    }
-    chatUnsub = rooms.subscribe(roomId, (msg) => {
-      if (msg?.type !== "CHAT") return;
-      addChatMessage(roomId, msg);
-      if (roomId === activeRoomId && currentView() === "rooms") {
-        renderChatMessages(getChat(roomId), libp2p.peerId.toString());
-      }
-    });
-  }
-
-  function subscribeRoomMessages(roomId) {
-    if (roomMsgsUnsub) {
-      roomMsgsUnsub();
-      roomMsgsUnsub = null;
-    }
-    roomMsgsUnsub = rooms.subscribe(roomId, async (msg) => {
-      if (msg?.type !== "MANIFEST" || !msg.manifest) return;
-      const prev = getRoom(roomId)?.manifest || { files: [], seq: 0 };
-      const next = msg.manifest;
-      const prevSet = new Set((prev.files || []).map((f) => f.cid));
-      const nextSet = new Set((next.files || []).map((f) => f.cid));
-      const newCids = [...nextSet].filter((c) => c && !prevSet.has(c));
-      if (newCids.length === 0 && (next.seq || 0) <= (prev.seq || 0)) return;
-      const byCid = new Map([...prev.files, ...next.files].map((f) => [f.cid, f]));
-      const merged = { files: [...byCid.values()], seq: Math.max(prev.seq || 0, next.seq || 0, Date.now()) + 1, updatedAt: Date.now() };
       saveRoom({ id: roomId, manifest: merged });
-      if (roomId === activeRoomId) {
+      rooms.setManifest(roomId, merged);
+      announceToTracker(roomId, merged).catch(() => {});
+
+      // Pin locally
+      for (const f of added.files) {
         try {
-          const r = getRoom(roomId);
-          renderRoomDetails(r);
-          // Re-render chat after DOM replacement so it doesn't appear blank
-          renderChatMessages(getChat(roomId), libp2p.peerId.toString());
-          bindRoomButtons(roomId);
-        } catch { }
+          for await (const _ of helia.pin.add(f.cid)) {}
+        } catch {}
       }
-      if (!newCids.length) return;
-      showFetchProgress(true, 0, newCids.length, `Syncing 0/${newCids.length}`);
-      let done = 0;
-      for (const cid of newCids) {
-        try { for await (const _ of helia.pin.add(cid)) { } } catch { }
-        done++;
-        showFetchProgress(true, done, newCids.length, `Syncing ${done}/${newCids.length}`);
-      }
-      showFetchProgress(false);
-    });
+
+      await renderRoomsIfActive();
+      toast("Files added to room");
+    } catch (e) {
+      console.error(e);
+      toast("Failed to add files");
+    }
   }
 
-  function renderRoomsIfActive() {
+  async function renderRoomsIfActive() {
     if (currentView() !== "rooms") return;
-    // rooms list
+
+    // Render rooms list
     const list = getRooms();
-    renderRoomsList(list, (r) => {
+    renderRoomsList(list, async (r) => {
       goto("rooms", { room: r.id });
-      activeRoomId = r.id;
-      renderRoomsIfActive();
+      await renderRoomsIfActive();
     });
-    // Removed keyboard navigation/selection for rooms panel per request
-    // active room
+
+    // Active room
     const sp = new URLSearchParams(location.search);
     const rid = sp.get("room");
     if (!rid) return;
-    activeRoomId = rid;
+
+    roomUI.setActiveRoom(rid);
     let room = getRoom(rid);
     if (!room) {
       saveRoom({ id: rid, name: `Room ${rid.slice(0, 6)}`, createdAt: Date.now() });
       room = getRoom(rid);
     }
-    if (room?.manifest) {
-      renderRoomDetails(room);
-      renderChatMessages(getChat(rid), libp2p.peerId.toString());
-      bindRoomButtons(rid);
-      subscribeChat(rid);
-      subscribeRoomMessages(rid);
-    } else {
-      // request manifest by sending HELLO if not yet known
-      rooms.attachJoin(rid, (manifest) => {
+
+    // Join room (handles both host and joiner)
+    await rooms.join(rid, {
+      onManifestUpdate: async (manifest) => {
+        console.log(`[Bootstrap] Manifest update callback: ${manifest.files.length} files`);
         saveRoom({ id: rid, manifest });
-        renderRoomsIfActive();
-      });
-      renderRoomDetails({
-        id: rid,
-        name: room?.name || `Room ${rid.slice(0, 6)}`,
-        manifest: { files: [] },
-      });
-      bindRoomButtons(rid);
-      subscribeChat(rid);
-      subscribeRoomMessages(rid);
+        // Re-render on manifest changes
+        if (roomUI.getActiveRoom() === rid) {
+          await roomUI.render(rid);
+        }
+      },
+      onNewFiles: async (newCids) => {
+        showFetchProgress(true, 0, newCids.length, `Syncing 0/${newCids.length}`);
+        let done = 0;
+        for (const cid of newCids) {
+          try {
+            for await (const _ of helia.pin.add(cid)) {}
+          } catch {}
+          done++;
+          showFetchProgress(true, done, newCids.length, `Syncing ${done}/${newCids.length}`);
+        }
+        showFetchProgress(false);
+      },
+    });
+
+    // Initial render (after join completes)
+    await roomUI.render(rid);
+
+    // Subscribe to chat and manifest observers
+    await roomUI.subscribeChat(rid);
+
+    // Bind file dropzone for this room
+    const rDrop = document.getElementById("room-dropzone");
+    const rInput = document.getElementById("room-file-input");
+    const rBrowse = document.getElementById("btn-room-browse");
+
+    if (rBrowse && rInput) rBrowse.onclick = () => rInput.click();
+    if (rInput) rInput.onchange = () => handleRoomFiles(rid, rInput.files);
+    if (rDrop) {
+      rDrop.ondragover = (e) => {
+        e.preventDefault();
+        rDrop.classList.add("bg-gray-100");
+      };
+      rDrop.ondragleave = () => rDrop.classList.remove("bg-gray-100");
+      rDrop.ondrop = (e) => {
+        e.preventDefault();
+        rDrop.classList.remove("bg-gray-100");
+        handleRoomFiles(rid, e.dataTransfer.files);
+      };
     }
   }
 
-  window.addEventListener("popstate", () => {
+  window.addEventListener("popstate", async () => {
     renderView();
-    renderRoomsIfActive();
+    await renderRoomsIfActive();
   });
-}
-
-// ------- Small helpers for file open/download + progress -------
-function newMsgId() {
-  return (
-    (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)) +
-    "-" +
-    Date.now().toString(36)
-  );
-}
-// lightweight enc helper for tracker control
-function enc(obj) { return new TextEncoder().encode(JSON.stringify(obj)); }
-
-
-async function announceToTracker(roomId, manifest) {
-  try {
-    const cids = (manifest?.files || []).map((f) => f.cid).filter(Boolean);
-    if (!cids.length) return;
-    // Control announce (optional)
-    await libp2p.services.pubsub.publish(TRACKER_CONTROL, enc({
-      type: "TRACKER_ANNOUNCE",
-      roomId,
-      fileCids: cids,
-      host: libp2p.peerId.toString(),
-      ts: Date.now(),
-    }));
-    // Content pin announce (server/newtracker extracts CIDs from JSON)
-    await libp2p.services.pubsub.publish(CONTENT_TOPIC, enc({ roomId, cids }));
-  } catch (e) {
-    console.warn("tracker announce failed", e?.message);
-  }
 }
