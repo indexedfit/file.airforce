@@ -237,6 +237,15 @@ export async function createYDoc(roomId, libp2p) {
         syncState = 'synced'
         const files = manifest.get('files') || []
         console.log(`[${roomId.slice(0, 6)}] After SNAPSHOT: ${files.length} files`, files.map(f => f.name))
+
+        // Send our state back to ensure bidirectional sync
+        const ourState = Y.encodeStateAsUpdate(ydoc)
+        console.log(`[${roomId.slice(0, 6)}] Sending our state back (${ourState.length} bytes)`)
+        libp2p.services?.pubsub?.publish(topic, enc({
+          type: 'Y_UPDATE',
+          update: Array.from(ourState),
+          roomId
+        })).catch(() => {})
       }
     } catch (err) {
       console.warn(`[${roomId.slice(0, 6)}] Failed to handle message:`, err)

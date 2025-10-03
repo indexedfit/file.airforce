@@ -191,6 +191,55 @@ export async function startUI() {
     onProgress: showFetchProgress,
   });
 
+  // Set up event delegation for room file inputs (robust to re-renders)
+  const roomsInfo = document.getElementById('rooms-info');
+  if (roomsInfo) {
+    // Browse button click
+    roomsInfo.addEventListener('click', (e) => {
+      if (e.target.id === 'btn-room-browse') {
+        const input = document.getElementById('room-file-input');
+        if (input) input.click();
+      }
+    });
+
+    // File input change
+    roomsInfo.addEventListener('change', (e) => {
+      if (e.target.id === 'room-file-input') {
+        const rid = roomUI.getActiveRoom();
+        if (rid && e.target.files && e.target.files.length > 0) {
+          handleRoomFiles(rid, e.target.files);
+        }
+      }
+    });
+
+    // Drag & drop
+    roomsInfo.addEventListener('dragover', (e) => {
+      if (e.target.id === 'room-dropzone' || e.target.closest('#room-dropzone')) {
+        e.preventDefault();
+        const dropzone = document.getElementById('room-dropzone');
+        if (dropzone) dropzone.classList.add('bg-gray-100');
+      }
+    });
+
+    roomsInfo.addEventListener('dragleave', (e) => {
+      if (e.target.id === 'room-dropzone') {
+        e.target.classList.remove('bg-gray-100');
+      }
+    });
+
+    roomsInfo.addEventListener('drop', (e) => {
+      if (e.target.id === 'room-dropzone' || e.target.closest('#room-dropzone')) {
+        e.preventDefault();
+        const dropzone = document.getElementById('room-dropzone');
+        if (dropzone) dropzone.classList.remove('bg-gray-100');
+        const rid = roomUI.getActiveRoom();
+        if (rid && e.dataTransfer.files) {
+          handleRoomFiles(rid, e.dataTransfer.files);
+        }
+      }
+    });
+  }
+
   setPeerId(libp2p.peerId.toString());
 
   // Update peer info periodically
@@ -324,6 +373,7 @@ export async function startUI() {
         name: $("room-name")?.value?.trim() || defaultName,
         manifest,
         createdAt: Date.now(),
+        lastSeen: Date.now(),
       };
 
       saveDrop({ ...drop, roomId: room.id });
@@ -369,12 +419,13 @@ export async function startUI() {
           id: roomId,
           name: `Room ${roomId.slice(0, 6)}`,
           createdAt: Date.now(),
+          lastSeen: Date.now(),
         });
 
       await rooms.join(roomId, {
         onManifestUpdate: async (manifest) => {
-          saveRoom({ id: roomId, manifest });
-          await renderRoomsIfActive();
+          saveRoom({ id: roomId, manifest, lastSeen: Date.now() });
+          updateRoomsList();
         },
       });
 
@@ -418,15 +469,20 @@ export async function startUI() {
     }
   }
 
-  async function renderRoomsIfActive() {
-    if (currentView() !== "rooms") return;
-
-    // Render rooms list
+  // Helper to update rooms list UI
+  function updateRoomsList() {
     const list = getRooms();
     renderRoomsList(list, async (r) => {
       goto("rooms", { room: r.id });
       await renderRoomsIfActive();
     });
+  }
+
+  async function renderRoomsIfActive() {
+    if (currentView() !== "rooms") return;
+
+    // Render rooms list
+    updateRoomsList();
 
     // Active room
     const sp = new URLSearchParams(location.search);
@@ -441,15 +497,20 @@ export async function startUI() {
     roomUI.setActiveRoom(rid);
     let room = getRoom(rid);
     if (!room) {
-      saveRoom({ id: rid, name: `Room ${rid.slice(0, 6)}`, createdAt: Date.now() });
+      saveRoom({ id: rid, name: `Room ${rid.slice(0, 6)}`, createdAt: Date.now(), lastSeen: Date.now() });
       room = getRoom(rid);
+      updateRoomsList();
     }
+
+    // Update lastSeen for existing room
+    saveRoom({ id: rid, lastSeen: Date.now() });
 
     // Join room (handles both host and joiner)
     await rooms.join(rid, {
       onManifestUpdate: async (manifest) => {
         console.log(`[Bootstrap] onManifestUpdate called for room ${rid.slice(0,6)}: ${manifest.files.length} files`);
-        saveRoom({ id: rid, manifest });
+        saveRoom({ id: rid, manifest, lastSeen: Date.now() });
+        updateRoomsList();
         if (roomUI.getActiveRoom() === rid) {
           console.log(`[Bootstrap] Re-rendering room UI`);
           await roomUI.render(rid);
@@ -484,44 +545,6 @@ export async function startUI() {
 
     // Subscribe to chat and manifest observers
     await roomUI.subscribeChat(rid);
-
-    // Bind file dropzone for this room
-    const rDrop = document.getElementById("room-dropzone");
-    const rInput = document.getElementById("room-file-input");
-    const rBrowse = document.getElementById("btn-room-browse");
-
-    if (!rBrowse) console.warn('btn-room-browse not found!');
-    if (!rInput) console.warn('room-file-input not found!');
-
-    if (rBrowse && rInput) {
-      console.log('Binding room file input handlers for room', rid.slice(0, 6));
-      // Remove old handlers to prevent duplicates
-      rBrowse.onclick = null;
-      rInput.onchange = null;
-
-      rBrowse.onclick = () => {
-        console.log('Browse clicked');
-        rInput.click();
-      };
-      rInput.onchange = () => {
-        console.log('File input changed:', rInput.files?.length || 0, 'files');
-        if (rInput.files && rInput.files.length > 0) {
-          handleRoomFiles(rid, rInput.files);
-        }
-      };
-    }
-    if (rDrop) {
-      rDrop.ondragover = (e) => {
-        e.preventDefault();
-        rDrop.classList.add("bg-gray-100");
-      };
-      rDrop.ondragleave = () => rDrop.classList.remove("bg-gray-100");
-      rDrop.ondrop = (e) => {
-        e.preventDefault();
-        rDrop.classList.remove("bg-gray-100");
-        handleRoomFiles(rid, e.dataTransfer.files);
-      };
-    }
   }
 
   window.addEventListener("popstate", async () => {

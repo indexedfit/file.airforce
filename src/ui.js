@@ -211,9 +211,10 @@ export function renderChatMessages(messages, selfId = "") {
     div.className = `text-sm mb-1 ${
       isSelf ? "text-blue-700" : "text-gray-800"
     }`;
-    const fromShort = (m.from || "anon").slice(0, 8);
+    const fromShort = (m.from || "anon").slice(0, 16);
     const time = m.ts ? new Date(m.ts).toLocaleTimeString() : "";
     div.textContent = `[${time}] ${fromShort}: ${m.text}`;
+    div.title = m.from || "anon"; // Full ID on hover
     frag.appendChild(div);
   });
   box.replaceChildren(frag);

@@ -15,11 +15,50 @@ import { bootstrap } from "@libp2p/bootstrap";
 import { inspectorMetrics } from "@ipshipyard/libp2p-inspector-metrics";
 import { createOPFSBlockstore } from "./opfs-blockstore.js";
 import { PUBSUB_PEER_DISCOVERY, TRACKERS } from "./constants.js";
+import { createEd25519PeerId, exportToProtobuf, createFromProtobuf } from '@libp2p/peer-id-factory';
+import { privateKeyFromProtobuf } from '@libp2p/crypto/keys';
+
+async function getOrCreatePeerId() {
+  const stored = localStorage.getItem('wc:peerId');
+
+  if (stored) {
+    try {
+      const binary = atob(stored);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      const peerId = await createFromProtobuf(bytes);
+
+      // Convert raw Uint8Array to PrivateKey object
+      const privateKey = privateKeyFromProtobuf(peerId.privateKey);
+      console.log('%cRestored peer ID', 'color: green; font-weight: bold', peerId.toString());
+      return privateKey;
+    } catch (err) {
+      console.warn('Failed to restore peer ID:', err.message);
+      localStorage.removeItem('wc:peerId');
+    }
+  }
+
+  console.log('%cCreating new peer ID', 'color: orange; font-weight: bold');
+  const peerId = await createEd25519PeerId();
+
+  const protobuf = exportToProtobuf(peerId, false);
+  const base64 = btoa(String.fromCharCode(...protobuf));
+  localStorage.setItem('wc:peerId', base64);
+
+  console.log('Saved peer ID:', peerId.toString());
+
+  // Convert raw Uint8Array to PrivateKey object
+  return privateKeyFromProtobuf(peerId.privateKey);
+}
 
 export async function startHelia() {
   const blockstore = await createOPFSBlockstore("wc-blocks");
+  const privateKey = await getOrCreatePeerId();
 
   const libp2p = await createLibp2p({
+    privateKey,
     metrics: inspectorMetrics(),
     addresses: { listen: ["/p2p-circuit", "/webrtc"] },
     transports: [
@@ -29,7 +68,13 @@ export async function startHelia() {
       circuitRelayTransport()
     ],
     connectionEncrypters: [noise()],
-    connectionManager: { maxConnections: 50, minConnections: 2, autoDial: true },
+    connectionManager: {
+      maxConnections: 50,
+      minConnections: 2,
+      autoDial: true,
+      inboundConnectionThreshold: 25,
+      maxIncomingPendingConnections: 10,
+    },
     streamMuxers: [yamux()],
     connectionGater: {
       denyDialMultiaddr: async () => false,
@@ -51,6 +96,17 @@ export async function startHelia() {
       console.log(`✓ Connected to ${peerId.slice(0, 8)}`)
     }).catch((err) => {
       console.log(`✗ Failed to dial ${peerId.slice(0, 8)}:`, err.message)
+    })
+  })
+
+  // Log when we get a circuit relay reservation
+  libp2p.addEventListener('peer:connect', (evt) => {
+    const remotePeer = evt.detail
+    const conns = libp2p.getConnections(remotePeer)
+    conns.forEach(conn => {
+      if (conn.remoteAddr.toString().includes('/p2p-circuit')) {
+        console.log(`✓ Circuit relay reservation: ${conn.remoteAddr.toString()}`)
+      }
     })
   })
 

@@ -25,6 +25,7 @@
     "@libp2p/bootstrap": "^11.0.43",
     "@libp2p/circuit-relay-v2": "^3.2.20",
     "@libp2p/identify": "^3.0.37",
+    "@libp2p/peer-id-factory": "^4.2.4",
     "@libp2p/pubsub-peer-discovery": "^11.0.2",
     "@libp2p/tcp": "^10.1.17",
     "@libp2p/webrtc": "^5.2.20",
