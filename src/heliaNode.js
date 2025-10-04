@@ -65,7 +65,9 @@ export async function startHelia() {
       webSockets(),
       webTransport(),
       webRTC(),
-      circuitRelayTransport()
+      circuitRelayTransport({
+        reservationConcurrency: 1,
+      })
     ],
     connectionEncrypters: [noise()],
     connectionManager: {
@@ -91,21 +93,35 @@ export async function startHelia() {
 
   libp2p.addEventListener('peer:discovery', (evt) => {
     const peerId = evt.detail.id.toString();
-    console.log(`Discovered ${peerId.slice(0, 8)}, dialing...`)
-    libp2p.dial(evt.detail.id).then(() => {
-      console.log(`✓ Connected to ${peerId.slice(0, 8)}`)
-    }).catch((err) => {
-      console.log(`✗ Failed to dial ${peerId.slice(0, 8)}:`, err.message)
-    })
+    console.log(`Discovered ${peerId.slice(0, 8)}`)
+    // Let identify protocol run first to get all addresses including circuit
+    setTimeout(() => {
+      const addrs = libp2p.peerStore.get(evt.detail.id).then(peer => {
+        console.log(`Dialing ${peerId.slice(0, 8)} with ${peer.addresses.length} addresses`)
+        return libp2p.dial(evt.detail.id)
+      }).then(() => {
+        console.log(`✓ Connected to ${peerId.slice(0, 8)}`)
+      }).catch((err) => {
+        console.log(`✗ Failed to dial ${peerId.slice(0, 8)}:`, err.message)
+      })
+    }, 2000)
   })
 
-  // Log when we get a circuit relay reservation
+  // Log circuit relay events
+  libp2p.addEventListener('self:peer:update', (evt) => {
+    const addrs = evt.detail.peer.addresses.map(a => a.multiaddr.toString())
+    const circuitAddrs = addrs.filter(a => a.includes('/p2p-circuit'))
+    if (circuitAddrs.length > 0) {
+      console.log(`✓ Got circuit addresses:`, circuitAddrs)
+    }
+  })
+
   libp2p.addEventListener('peer:connect', (evt) => {
     const remotePeer = evt.detail
     const conns = libp2p.getConnections(remotePeer)
     conns.forEach(conn => {
       if (conn.remoteAddr.toString().includes('/p2p-circuit')) {
-        console.log(`✓ Circuit relay reservation: ${conn.remoteAddr.toString()}`)
+        console.log(`✓ Connected via circuit: ${conn.remoteAddr.toString()}`)
       }
     })
   })
