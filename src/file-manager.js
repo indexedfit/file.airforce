@@ -62,9 +62,13 @@ export function formatBytes(bytes) {
 }
 
 export function openFile(blob, name) {
-  const url = URL.createObjectURL(blob);
-  window.open(url, "_blank");
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  // iOS Safari doesn't support blob URLs in window.open()
+  // Convert to data URL instead
+  const reader = new FileReader();
+  reader.onload = () => {
+    window.open(reader.result, "_blank");
+  };
+  reader.readAsDataURL(blob);
 }
 
 export function downloadFile(blob, name) {
