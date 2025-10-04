@@ -11,9 +11,17 @@ import { circuitRelayServer } from '@libp2p/circuit-relay-v2'
 import { PUBSUB_PEER_DISCOVERY } from '../src/constants.js'
 
 async function main() {
+  // Railway/production: Use PORT env var for public WebSocket
+  // Local dev: Default to 9004 for WS, 9003 for TCP
+  const WS_PORT = process.env.PORT || 9004
+  const TCP_PORT = process.env.TCP_PORT || 9003
+
   const libp2p = await createLibp2p({
     addresses: {
-      listen: ['/ip4/0.0.0.0/tcp/9004/ws', '/ip4/0.0.0.0/tcp/9003'],
+      listen: [
+        `/ip4/0.0.0.0/tcp/${WS_PORT}/ws`,
+        `/ip4/0.0.0.0/tcp/${TCP_PORT}`
+      ],
     },
     transports: [webSockets(), tcp()],
     connectionEncrypters: [noise()],
@@ -38,6 +46,7 @@ async function main() {
   })
   libp2p.services.pubsub.subscribe(PUBSUB_PEER_DISCOVERY)
   console.log('PeerID: ', libp2p.peerId.toString())
+  console.log('WS Port:', WS_PORT, '| TCP Port:', TCP_PORT)
   console.log('Multiaddrs: ', libp2p.getMultiaddrs())
 
   // Track peer connections with more detail
