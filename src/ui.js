@@ -9,6 +9,14 @@ const setHidden = (id, hidden) => {
   const el = $(id);
   if (el) el.classList.toggle("hidden", hidden);
 };
+
+const formatBytes = (bytes) => {
+  if (!bytes || bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return Math.round((bytes / Math.pow(k, i)) * 10) / 10 + " " + sizes[i];
+};
 export const toast = (msg) => {
   const t = $("toast");
   if (!t) return;
@@ -177,7 +185,7 @@ export function renderRoomDetails(room, opts = {}) {
         <ul id="room-files" class="space-y-1">${files
           .map(
             (f, idx) => `
-          <li class=\"flex items-center gap-2 cursor-pointer no-outline\" data-idx=\"${idx}\" tabindex=\"0\">\n            <span class=\"flex-1 truncate\">${f.name}</span>\n            <span class=\"text-xs text-gray-500\">${f.size ?? ""} ${f.size ? "bytes" : ""}</span>\n            <button data-action=\"open-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-0.5 border rounded text-xs\">Open</button>\n            <button data-action=\"download-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-0.5 border rounded text-xs\">Download</button>\n          </li>`
+          <li class=\"flex items-center gap-2 cursor-pointer no-outline py-1\" data-idx=\"${idx}\" tabindex=\"0\">\n            <span class=\"flex-1 truncate text-sm\">${f.name}</span>\n            <span class=\"text-xs text-gray-500 whitespace-nowrap\">${formatBytes(f.size)}</span>\n            <button data-action=\"open-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-1 border rounded text-xs\">Open</button>\n            <button data-action=\"download-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-1 border rounded text-xs\">Download</button>\n          </li>`
           )
           .join("")}</ul>
 
