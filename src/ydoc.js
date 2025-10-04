@@ -4,7 +4,31 @@ import { ROOM_TOPIC } from './constants.js'
 
 /**
  * Y.js document manager - handles CRDT sync over libp2p gossipsub
- * No y-webrtc or y-libp2p-connector - we use our existing libp2p mesh
+ *
+ * SYNC PROTOCOL (over pubsub topic wc/<roomId>):
+ *
+ * 1. Y_UPDATE: Incremental CRDT updates (efficient, real-time)
+ *    - Broadcast when local doc changes
+ *    - Applied to remote doc on receive
+ *    - Marks peer as synced (prevents infinite retries)
+ *
+ * 2. SNAPSHOT_REQUEST: Request full state from peers
+ *    - Sent after 1s delay on join (allows peer connections)
+ *    - Retried every 5s until synced
+ *
+ * 3. SNAPSHOT: Full CRDT state response
+ *    - Sent when receiving SNAPSHOT_REQUEST
+ *    - Marks peer as synced
+ *    - Responder sends their state back (bidirectional sync)
+ *
+ * SYNC STATE MACHINE:
+ * - loading → syncing → synced
+ * - Only Y_UPDATE or SNAPSHOT mark as synced
+ * - Prevents retry loop when peers exchange updates
+ *
+ * PERSISTENCE:
+ * - Loads from OPFS/IndexedDB BEFORE network activity (prevents race conditions)
+ * - Auto-saves full state on every Y.js update
  */
 
 // ===== Persistence (OPFS + IndexedDB fallback) =====
@@ -170,6 +194,8 @@ export async function createYDoc(roomId, libp2p) {
 
 
   // Track sync state: 'loading' -> 'syncing' -> 'synced'
+  // IMPORTANT: Only mark as 'synced' when receiving Y_UPDATE or SNAPSHOT
+  // This prevents infinite SNAPSHOT_REQUEST retry loops
   let syncState = 'loading'
 
   // Initialize persistence FIRST (before any network activity)
@@ -198,12 +224,18 @@ export async function createYDoc(roomId, libp2p) {
   // Broadcast updates to gossipsub
   const updateHandler = (update, origin) => {
     if (origin === 'network' || origin === 'storage') return
-    console.log(`[${roomId.slice(0, 6)}] Broadcasting Y_UPDATE (${update.length} bytes)`)
+    const peers = libp2p.services?.pubsub?.getSubscribers(topic) || []
+    console.log(`[${roomId.slice(0, 6)}] Broadcasting Y_UPDATE (${update.length} bytes) to ${peers.length} peers`)
     libp2p.services?.pubsub?.publish(topic, enc({
       type: 'Y_UPDATE',
       update: Array.from(update),
       roomId
-    })).catch(() => {})
+    })).catch((err) => {
+      // Ignore expected "no peers" errors during mesh formation
+      if (!err.message?.includes('NoPeersSubscribedToTopic')) {
+        console.warn(`[${roomId.slice(0, 6)}] Y_UPDATE publish failed:`, err)
+      }
+    })
   }
 
   // Listen for remote updates
@@ -214,21 +246,35 @@ export async function createYDoc(roomId, libp2p) {
 
       if (msg.type === 'Y_UPDATE') {
         // Real-time incremental update (efficient)
-        console.log(`[${roomId.slice(0, 6)}] Received Y_UPDATE (${msg.update.length} bytes)`)
+        const beforeFiles = (manifest.get('files') || []).length
+        console.log(`[${roomId.slice(0, 6)}] Received Y_UPDATE (${msg.update.length} bytes) from peer`)
         Y.applyUpdate(ydoc, new Uint8Array(msg.update), 'network')
         const files = manifest.get('files') || []
-        console.log(`[${roomId.slice(0, 6)}] After Y_UPDATE: ${files.length} files:`, files.map(f => f.name))
+        console.log(`[${roomId.slice(0, 6)}] After Y_UPDATE: ${beforeFiles} -> ${files.length} files`, files.map(f => f.name))
+
+        // CRITICAL: Mark as synced when receiving Y_UPDATE from a peer
+        // This prevents both peers from being stuck in "syncing" state
+        // and endlessly retrying SNAPSHOT_REQUEST every 5s
+        if (syncState !== 'synced' && msg.update.length > 0) {
+          console.log(`[${roomId.slice(0, 6)}] Marking as synced after receiving Y_UPDATE`)
+          syncState = 'synced'
+        }
       }
       else if (msg.type === 'SNAPSHOT_REQUEST') {
         // Peer wants full state (new joiner or reconnect)
         const fullState = Y.encodeStateAsUpdate(ydoc)
         const files = manifest.get('files') || []
-        console.log(`[${roomId.slice(0, 6)}] SNAPSHOT_REQUEST -> sending full state: ${fullState.length} bytes, ${files.length} files`)
+        const peers = libp2p.services?.pubsub?.getSubscribers(topic) || []
+        console.log(`[${roomId.slice(0, 6)}] SNAPSHOT_REQUEST received -> sending ${fullState.length} bytes, ${files.length} files to ${peers.length} peers`)
         libp2p.services?.pubsub?.publish(topic, enc({
           type: 'SNAPSHOT',
           update: Array.from(fullState),
           roomId
-        })).catch(() => {})
+        })).catch((err) => {
+          if (!err.message?.includes('NoPeersSubscribedToTopic')) {
+            console.warn(`[${roomId.slice(0, 6)}] SNAPSHOT publish failed:`, err)
+          }
+        })
       }
       else if (msg.type === 'SNAPSHOT') {
         // Full state from peer (initial sync or refresh catch-up)
@@ -238,14 +284,20 @@ export async function createYDoc(roomId, libp2p) {
         const files = manifest.get('files') || []
         console.log(`[${roomId.slice(0, 6)}] After SNAPSHOT: ${files.length} files`, files.map(f => f.name))
 
-        // Send our state back to ensure bidirectional sync
+        // Bidirectional sync: Send our state back to the responder
+        // This ensures both peers have each other's state
+        // Responder might have requested our snapshot while we requested theirs
         const ourState = Y.encodeStateAsUpdate(ydoc)
         console.log(`[${roomId.slice(0, 6)}] Sending our state back (${ourState.length} bytes)`)
         libp2p.services?.pubsub?.publish(topic, enc({
           type: 'Y_UPDATE',
           update: Array.from(ourState),
           roomId
-        })).catch(() => {})
+        })).catch((err) => {
+          if (!err.message?.includes('NoPeersSubscribedToTopic')) {
+            console.warn(`[${roomId.slice(0, 6)}] Bidirectional Y_UPDATE failed:`, err)
+          }
+        })
       }
     } catch (err) {
       console.warn(`[${roomId.slice(0, 6)}] Failed to handle message:`, err)
@@ -262,27 +314,60 @@ export async function createYDoc(roomId, libp2p) {
 
   ydoc.on('update', updateHandler)
 
+  // Track when we started trying to sync (for timeout)
+  const syncStartTime = Date.now()
+  const MESH_TIMEOUT_MS = 10000 // 10s timeout for mesh formation
+
   // Request initial snapshot - always request to ensure bidirectional sync
   const requestSnapshot = () => {
     const files = manifest.get('files') || []
-    console.log(`[${roomId.slice(0, 6)}] Requesting SNAPSHOT (currently have ${files.length} files)`)
+    const peers = libp2p.services?.pubsub?.getSubscribers(topic) || []
+    const allPeers = libp2p.getPeers()?.length || 0
+    const waitingTime = Date.now() - syncStartTime
+
+    // Don't spam publish if no peers subscribed yet (gossipsub mesh not formed)
+    // BUT: After timeout, try anyway (mesh check might be wrong, or relay issues)
+    if (peers.length === 0 && allPeers > 0 && waitingTime < MESH_TIMEOUT_MS) {
+      console.log(`[${roomId.slice(0, 6)}] Waiting for gossipsub mesh (${allPeers} peers connected, 0 subscribed to topic)`)
+      return
+    }
+
+    // If we hit timeout, warn user but try publishing anyway
+    if (peers.length === 0 && allPeers > 0 && waitingTime >= MESH_TIMEOUT_MS) {
+      console.warn(`[${roomId.slice(0, 6)}] Gossipsub mesh timeout (${waitingTime}ms) - attempting publish anyway`)
+    }
+
+    console.log(`[${roomId.slice(0, 6)}] Requesting SNAPSHOT (have ${files.length} files, ${peers.length} room peers, ${allPeers} total peers)`)
     syncState = 'syncing'
     libp2p.services?.pubsub?.publish(topic, enc({
       type: 'SNAPSHOT_REQUEST',
       roomId
-    })).catch(() => {})
+    })).catch((err) => {
+      // Only warn if it's not the expected "no peers" error
+      if (!err.message?.includes('NoPeersSubscribedToTopic')) {
+        console.warn(`[${roomId.slice(0, 6)}] SNAPSHOT_REQUEST publish failed:`, err)
+      }
+    })
   }
 
-  // Request snapshot after delay (let peers connect)
-  setTimeout(requestSnapshot, 1000)
+  // Request snapshot after delay (let gossipsub mesh form - heartbeat is ~1s)
+  // Initial delay of 2s gives gossipsub time for at least 1-2 heartbeats
+  setTimeout(requestSnapshot, 2000)
 
-  // Retry snapshot requests periodically until we get one
+  // Retry snapshot requests periodically until synced
+  // Stops when syncState becomes 'synced' (after receiving Y_UPDATE or SNAPSHOT)
+  // Without marking Y_UPDATE as synced, both peers would retry forever
+  // Shorter interval (2s) since we now skip publish when mesh not ready
   const syncInterval = setInterval(() => {
     if (syncState !== 'synced') {
-      console.log(`[${roomId.slice(0, 6)}] Still not synced (${syncState}), retrying SNAPSHOT_REQUEST...`)
+      const files = manifest.get('files') || []
+      const peers = libp2p.services?.pubsub?.getSubscribers(topic) || []
+      if (peers.length > 0) {
+        console.log(`[${roomId.slice(0, 6)}] Still not synced (${syncState}), have ${files.length} files, ${peers.length} room peers - retrying...`)
+      }
       requestSnapshot()
     }
-  }, 5000)
+  }, 2000)
 
   // Cleanup
   const destroy = () => {

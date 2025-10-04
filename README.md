@@ -1,115 +1,272 @@
-**web.cleaning**
+# file.airforce
 
-- A featherweight, query-driven web app that wraps a browser‑persistent Helia node (OPFS first, IndexedDB fallback), supports invite-based “rooms” over libp2p pubsub, and mirrors CIDs locally (pin → fetch into OPFS). The UI never re-renders the shell; it toggles sections and updates content surgically for snappy performance.
+Browser-based peer-to-peer file sharing using Helia (IPFS), libp2p, and Y.js CRDTs. Create invite-based "rooms" to share files without a backend server. Files persist in your browser using OPFS.
 
-**Background**
+## Key Technologies
 
-- Goals
-  - Make small ad‑hoc “drops” easy to share via a link/QR without a backend.
-  - Keep data local and durable using the browser’s Origin Private File System (OPFS).
-  - Use libp2p + Helia for content addressing, discovery, and distribution.
-  - Stay fast by avoiding heavy frameworks and unnecessary DOM churn.
-- Design Highlights
-  - OPFS Blockstore with IndexedDB fallback keeps blocks on-device and persistent.
-  - Rooms over pubsub (`wc/<roomId>`) with messages: HELLO, MANIFEST, REQUEST, ACK.
-  - Optional tracker node subscribes and pins requested CIDs to help others mirror.
-  - UI uses query params (`?view=home|drops|rooms|peers`) and section toggling.
+- **Helia + libp2p**: Content addressing, peer discovery, and data distribution
+- **Y.js CRDTs**: Collaborative state synchronization (manifest + chat)
+- **OPFS + IndexedDB**: Persistent browser storage for IPFS blocks
+- **React**: UI framework
+- **Vite**: Build tool and dev server
 
-**Project Layout**
+## Quick Start
 
-- `package.json` scripts for build/dev/tests and helper nodes
-- `esbuild.js` bundles and copies `index.html` to `dist/`
-- `src/`
-  - `index.html` minimal Tailwind UI and sections
-  - `main.js` app glue (uploads, pin/mirror, invites, room join)
-  - `router.js` query-based router (toggles sections only)
-  - `ui.js` small DOM helpers and renderers
-  - `store.js` localStorage metadata for drops/rooms/peers
-  - `heliaNode.js` Helia + libp2p (websockets, webtransport, webrtc, gossipsub)
-  - `opfs-blockstore.js` OPFS-first blockstore with IDB fallback
-  - `room.js` pubsub protocol helper
-  - `peers.js` snapshots of connections by type and details
-  - `constants.js` discovery topic, trackers, LS keys
-- `server/`
-  - `relay.js` reference libp2p relay (reuses GOLDEN conventions)
-  - `tracker.js` minimalist pinning/mirroring node
-- `tests/`
-  - `smoke.mjs` Node smoke test for `store.js`
+```bash
+# Install dependencies (Node.js 20+, Node 22 recommended)
+npm install
 
-**Requirements**
+# Start dev server
+npm start
 
-- Node.js 20+ recommended; Node 22 works great (nvm: `nvm use 22`).
-- Modern Chromium-based browser or Firefox for OPFS + WebRTC/WebTransport. Localhost counts as a secure context for required APIs.
+# Optional: Run relay for local testing
+npm run relay
+```
 
-**Quickstart**
+### First Use
 
-- Install
-  - `npm i`
-- Configure (optional)
-  - Edit `src/constants.js`:
-    - `TRACKERS`: add your relay multiaddr(s) for bootstrap/dialing.
-    - `PUBSUB_PEER_DISCOVERY`: keep in sync with your relay’s discovery topic.
-- Run web app (dev server)
-  - `npm start`
-  - Open the printed URL and create a “drop”; use “Invite” to copy/QR a room link.
-- Optional helpers
-  - Relay: `npm run start:relay` (prints PeerID and multiaddrs)
-  - Tracker (pinning): `npm run start:tracker`
-  - Tracker+Mirror+Relay combo: `npm run start:newtracker` (see `server/newtracker.js` for env toggles like DHT, delegated routing, WebRTC)
+1. Open the app and upload files
+2. Room is created automatically with an invite link
+3. Share the invite link or QR code
+4. Joiners get the manifest and can download files P2P
 
-**How It Works**
+## Architecture
 
-- Upload → Manifest
-  - Files are added via `@helia/unixfs`. A simple manifest of `{ name, size, cid }[]` is created.
-  - Each file is pinned locally; with the OPFS blockstore, blocks persist across reloads.
-- Rooms & Invites
-  - Creating a drop can also create a room (`roomId`).
-  - Invite links encode the `roomId` (and optionally a bootstrap tracker multiaddr).
-  - Joiners subscribe to `wc/<roomId>`, receive MANIFEST, and send REQUEST for selected CIDs.
-- Mirroring
-  - Host and tracker(s) pin requested CIDs. Joiners also pin to force fetch into OPFS.
-  - Pinned blocks survive reloads and keep GC-safe.
+### Storage & Persistence
 
-**Pubsub Messages**
+**OPFS Blockstore** (`src/opfs-blockstore.js`)
+- Primary storage: OPFS (Origin Private File System) with nested directory structure
+  - Path: `blocks/<first2>/<next2>/<cid>.bin`
+  - Survives page reloads, persistent in browser storage
+- Fallback: IndexedDB for browsers without OPFS support
+- Implements Helia blockstore interface: `get`, `put`, `has`, `delete`, `putMany`, `getMany`
 
-- Topic: `wc/<roomId>`
-  - `HELLO`: `{ type, roomId, from }`
-  - `MANIFEST`: `{ type, roomId, manifest }`
-  - `REQUEST`: `{ type, roomId, fileCids: string[], from }`
-  - `ACK`: `{ type, roomId, info }`
+**Y.js Document Storage** (`src/ydoc.js`)
+- Y.js state persisted to OPFS or IndexedDB under `ydocs/` directory
+- Loads existing state before network activity (prevents race conditions)
+- Auto-saves on every Y.js update
 
-**Commands**
+**Metadata Storage** (`src/store.js`)
+- localStorage for drops/rooms list (JSON serialized)
+- Keys: `wc:drops`, `wc:rooms`, `wc:peers`, `wc:peerId`
 
-- Build once: `npm run build`
-- Dev server: `npm start`
-- Tests: `npm test` (Node-based smoke test)
-- Relay: `npm run start:relay`
-- Tracker: `npm run start:tracker`
+### Helia + libp2p Setup
 
-**Tests**
+**Node Creation** (`src/heliaNode.js`)
+- **Persistent Peer ID**: Stored in localStorage (`wc:peerId`), restored on reload
+- **Transports**: WebSockets, WebTransport, WebRTC, Circuit Relay
+- **Peer Discovery**:
+  - Bootstrap nodes from `TRACKERS` array
+  - Pubsub peer discovery via gossipsub topic (`PUBSUB_PEER_DISCOVERY`)
+- **Pubsub**: Gossipsub for room messaging and peer discovery
+- **Connection Management**: Auto-dial discovered peers, maintain 2-50 connections
 
-- `tests/smoke.mjs`: Polyfills `localStorage` and validates `src/store.js` operations
-  - Run: `npm test`
-- Future work (suggested)
-  - E2E with Playwright to exercise: start page → upload → create room → invite URL → join flow → request/mirror → verify pins via Helia API.
-  - Unit tests for `opfs-blockstore.js` using fake FileSystemAccess APIs.
+**Block Storage**: OPFS-first blockstore for persistent browser storage
 
-**Troubleshooting**
+### Room & Sync Mechanism
 
-- Node version
-  - If you see engine warnings, switch to a newer Node: `nvm use 22`.
-- Secure context
-  - WebRTC and Web Crypto require a secure context. Localhost is OK; otherwise use HTTPS.
-- No peers
-  - Ensure `TRACKERS` points at a reachable relay multiaddr and the relay is running.
-- OPFS quota/availability
-  - Some browsers gate OPFS behind secure context and quota prompts. Free space by removing old drops or using browser site data settings.
+**Y.js CRDT Synchronization** (`src/ydoc.js`)
 
-**Security Notes**
+Each room has a Y.js document with two CRDTs:
+- `manifest` (Y.Map): Shared file list `{ files: [{name, size, cid}], updatedAt }`
+- `chat` (Y.Array): Chat messages `[{text, from, ts, msgId}]`
 
-- Invites and room metadata are not encrypted in this baseline.
-- For sensitive use, add a shared secret to the invite and encrypt MANIFEST (e.g., AES‑GCM) and/or sign messages. See “Polish next” ideas in `implement.md`.
+**Sync Protocol** (over libp2p pubsub topic `wc/<roomId>`):
 
-**License**
+1. **Y_UPDATE**: Incremental CRDT state updates
+   - Broadcast automatically when local Y.js doc changes
+   - Applied to remote doc on receive
+   - **Marks peer as synced** (prevents infinite snapshot requests)
 
-- Same as the repository unless specified otherwise.
+2. **SNAPSHOT_REQUEST**: Request full state from peers
+   - Sent after 1s delay on join (allows peer connections to form)
+   - Retried every 5s until synced
+
+3. **SNAPSHOT**: Full CRDT state response
+   - Sent when receiving SNAPSHOT_REQUEST
+   - Responder also sends their state back for bidirectional sync
+   - Marks peer as synced
+
+4. **FILE_REQUEST**: Lightweight file request hint (non-CRDT)
+   - Published to room topic when user requests files
+   - Triggers peers to pin CIDs (helps bitswap distribution)
+
+**Sync State Machine**:
+- `loading` → `syncing` → `synced`
+- Only SNAPSHOT or Y_UPDATE mark state as `synced`
+- Prevents retry loop spam
+
+**Important Implementation Details**:
+- Persistence loads BEFORE network activity
+- Observers cleaned up on rejoin to prevent memory leaks
+- Host sets manifest only on first join
+- Every Y.js update triggers observers
+
+### Room Manager
+
+**Room Operations** (`src/room.js` → `createRoomManager()`)
+- `join(roomId, options)`: Unified join for host/joiner
+  - Host: Sets initial manifest on first join
+  - Joiner: Subscribes to manifest/chat updates
+  - Callbacks: `onManifestUpdate`, `onNewFiles`
+- `setManifest(roomId, manifest)`: Update manifest via Y.js
+- `getManifest(roomId)`: Read current manifest from Y.js
+- `sendChat(roomId, text, msgId)`: Add message to Y.js chat array
+- `requestFiles(roomId, fileCids)`: Publish FILE_REQUEST message
+
+**Room UI** (`src/room.js` → `RoomUI` class)
+- Manages active room view rendering
+- Binds file action buttons (open, download)
+- Handles chat input and messages
+- Keyboard navigation for file list
+- Auto-subscribes to chat updates
+
+### Data Flow
+
+```
+Upload Files
+  ↓
+@helia/unixfs adds files → blocks stored in OPFS blockstore
+  ↓
+Manifest created: { files: [{name, size, cid}], updatedAt }
+  ↓
+Files pinned locally (prevents GC)
+  ↓
+Room created with roomId
+  ↓
+Y.js doc initialized, manifest set via Y.Map
+  ↓
+Subscribe to pubsub topic: wc/<roomId>
+  ↓
+Invite URL: ?view=rooms&room=<roomId>
+```
+
+```
+Joiner Flow
+  ↓
+Open invite URL
+  ↓
+Subscribe to wc/<roomId>
+  ↓
+Y.js doc loads from local storage (if exists)
+  ↓
+Send SNAPSHOT_REQUEST after 1s
+  ↓
+Receive Y_UPDATE or SNAPSHOT → apply to Y.js doc
+  ↓
+Manifest observer fires → UI updates with file list
+  ↓
+User requests files → publish FILE_REQUEST
+  ↓
+Pin CIDs → bitswap fetches blocks → OPFS storage
+  ↓
+onNewFiles callback → auto-pin files
+```
+
+### UI & Routing
+
+**Bootstrap** (`src/bootstrap.js`)
+- Main app initialization and event binding
+- Query-based routing: `?view=home|drops|rooms|peers`
+- Auto-creates drop+room when files uploaded
+- Handles room file additions and manifest merging
+
+**Rendering** (`src/ui.js`)
+- Surgical DOM updates (no full re-renders)
+- File list, chat messages, peer info, addresses
+- Progress indicators for uploads/downloads
+
+**File Manager** (`src/file-manager.js`)
+- `addFilesAndCreateManifest()`: Upload files via Helia unixfs
+- `fetchFileAsBlob()`: Download files from IPFS with progress
+- `openFile()`, `downloadFile()`: Browser file operations
+
+## Project Structure
+
+```
+src/
+├── heliaNode.js          # Helia + libp2p initialization
+├── opfs-blockstore.js    # OPFS/IndexedDB persistent blockstore
+├── ydoc.js               # Y.js CRDT manager & sync protocol
+├── room.js               # Room manager + Room UI
+├── bootstrap.js          # App initialization & routing
+├── ui.js                 # DOM rendering helpers
+├── store.js              # localStorage metadata
+├── file-manager.js       # File upload/download
+├── constants.js          # Config (TRACKERS, discovery topic)
+├── App.jsx               # React app root
+└── main.jsx              # React entry point
+
+server/
+├── relay.js              # libp2p relay node (WebSocket + TCP)
+└── tracker.js            # Pinning/mirroring helper node
+
+tests/
+├── smoke.mjs             # Node smoke tests
+├── router.mjs            # Routing logic tests
+└── e2e/*.spec.js         # Playwright E2E tests
+```
+
+## Configuration
+
+**Bootstrap Relays** (`src/constants.js`)
+```js
+export const TRACKERS = [
+  "/ip4/127.0.0.1/tcp/9004/ws/p2p/<peerId>",
+  // Add your relay multiaddrs here
+];
+```
+
+**Peer Discovery Topic** (`src/constants.js`)
+```js
+export const PUBSUB_PEER_DISCOVERY = "gayboys-inc";
+// Keep in sync with your relay's discovery topic
+```
+
+## Commands
+
+```bash
+# Development
+npm start                # Dev server (Vite)
+npm run build            # Production build to dist/
+npm run preview          # Preview production build
+
+# Testing
+npm test                 # Node smoke tests
+npm run test:e2e         # Playwright E2E tests
+
+# Helper Nodes
+npm run relay            # libp2p relay (TCP 9003 + WS 9004)
+npm run tracker          # Pinning/mirroring tracker node
+```
+
+## Common Issues
+
+**No peers connecting**
+- Verify relay is running: `npm run relay`
+- Check `TRACKERS` multiaddrs in `src/constants.js`
+- Ensure relay PeerID matches multiaddr
+
+**Manifest not syncing**
+- Check browser console for Y.js logs: `[roomId] Received Y_UPDATE`
+- Verify peer count in logs: `Broadcasting Y_UPDATE to N peers`
+- If `N = 0`, gossipsub mesh hasn't formed (wait a few seconds)
+
+**OPFS errors**
+- Requires secure context (HTTPS or localhost)
+- Check browser quota and available storage
+- Falls back to IndexedDB automatically
+
+**WebRTC failures**
+- Ensure relay has public IP or use circuit relay transport
+- Circuit relay reservations logged: `✓ Circuit relay reservation: ...`
+
+## Security Notes
+
+- Invites and room metadata are **not encrypted** in this baseline
+- For sensitive use: add shared secret to invite URL and encrypt manifest (AES-GCM)
+- Consider signing messages for authenticity
+
+## License
+
+Same as repository unless specified otherwise.
