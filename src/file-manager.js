@@ -62,13 +62,20 @@ export function formatBytes(bytes) {
 }
 
 export function openFile(blob, name) {
-  // iOS Safari doesn't support blob URLs in window.open()
-  // Convert to data URL instead
-  const reader = new FileReader();
-  reader.onload = () => {
-    window.open(reader.result, "_blank");
-  };
-  reader.readAsDataURL(blob);
+  const url = URL.createObjectURL(blob);
+
+  // iOS Safari requires synchronous window.open with blob URLs
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
+  if (isIOS) {
+    // For iOS, open immediately and revoke after delay
+    const win = window.open(url, "_blank");
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  } else {
+    // Standard approach for desktop browsers
+    window.open(url, "_blank");
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
 }
 
 export function downloadFile(blob, name) {
