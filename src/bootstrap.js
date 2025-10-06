@@ -431,9 +431,16 @@ export async function startUI() {
           lastSeen: Date.now(),
         });
 
+      const existing = getRoom(roomId);
       await rooms.join(roomId, {
         onManifestUpdate: async (manifest) => {
-          saveRoom({ id: roomId, manifest, lastSeen: Date.now() });
+          const room = getRoom(roomId);
+          saveRoom({
+            id: roomId,
+            name: room?.name || `Room ${roomId.slice(0, 6)}`,
+            manifest,
+            lastSeen: Date.now()
+          });
           updateRoomsList();
         },
       });
@@ -518,7 +525,13 @@ export async function startUI() {
     await rooms.join(rid, {
       onManifestUpdate: async (manifest) => {
         console.log(`[Bootstrap] onManifestUpdate called for room ${rid.slice(0,6)}: ${manifest.files.length} files`);
-        saveRoom({ id: rid, manifest, lastSeen: Date.now() });
+        const room = getRoom(rid);
+        saveRoom({
+          id: rid,
+          name: room?.name || `Room ${rid.slice(0, 6)}`,
+          manifest,
+          lastSeen: Date.now()
+        });
         updateRoomsList();
         if (roomUI.getActiveRoom() === rid) {
           console.log(`[Bootstrap] Re-rendering room UI`);
