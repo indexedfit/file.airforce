@@ -40,18 +40,28 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
 }
 
 export async function addFilesAndCreateManifest(fs, files, onProgress = () => {}) {
+  console.log(`[addFiles] Starting with ${files.length} files`);
   const manifest = { files: [], updatedAt: Date.now() };
   let done = 0;
   const total = files.length;
 
   for (const f of files) {
-    const data = new Uint8Array(await f.arrayBuffer());
-    const cid = await fs.addBytes(data);
-    manifest.files.push({ name: f.name, size: f.size, cid: cid.toString() });
-    done++;
-    onProgress(done, total);
+    console.log(`[addFiles] Processing file ${done + 1}/${total}: ${f.name} (${f.size} bytes)`);
+    try {
+      const data = new Uint8Array(await f.arrayBuffer());
+      console.log(`[addFiles] Read ${data.length} bytes, adding to blockstore...`);
+      const cid = await fs.addBytes(data);
+      console.log(`[addFiles] Added with CID: ${cid.toString()}`);
+      manifest.files.push({ name: f.name, size: f.size, cid: cid.toString() });
+      done++;
+      onProgress(done, total);
+    } catch (err) {
+      console.error(`[addFiles] Failed to add ${f.name}:`, err);
+      throw err;
+    }
   }
 
+  console.log(`[addFiles] Completed, manifest has ${manifest.files.length} files`);
   return manifest;
 }
 
@@ -62,17 +72,49 @@ export function formatBytes(bytes) {
 }
 
 export function openFile(blob, name) {
-  const url = URL.createObjectURL(blob);
-
-  // iOS Safari requires synchronous window.open with blob URLs
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+  const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
 
-  if (isIOS) {
-    // For iOS, open immediately and revoke after delay
-    const win = window.open(url, "_blank");
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  if (isIOS || isSafari) {
+    // Safari/iOS: Pre-open window synchronously to avoid popup blocker
+    const win = window.open("", "_blank");
+    if (!win) {
+      console.warn('Popup blocked');
+      return;
+    }
+
+    // Show loading state
+    win.document.write(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Loading...</title>
+        <style>
+          body { margin: 0; padding: 0; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; }
+          iframe { border: 0; width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; }
+        </style>
+      </head>
+      <body>
+        <div>Loading ${name}...</div>
+      </body>
+      </html>
+    `);
+    win.document.close();
+
+    // Convert to data URL and update window content
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result;
+      win.document.body.innerHTML = `<iframe src="${dataUrl}"></iframe>`;
+    };
+    reader.onerror = () => {
+      win.document.body.innerHTML = '<div>Failed to load file</div>';
+    };
+    reader.readAsDataURL(blob);
   } else {
     // Standard approach for desktop browsers
+    const url = URL.createObjectURL(blob);
     window.open(url, "_blank");
     setTimeout(() => URL.revokeObjectURL(url), 60_000);
   }

@@ -1,7 +1,7 @@
 // Minimal browser Blockstore using OPFS with IDB fallback.
 // Methods used by Helia: open, close (noop), get, put, has, delete, putMany/getMany (best effort).
 
-const supportsOPFS = !!(navigator?.storage?.getDirectory)
+import { supportsOPFS } from './opfs-utils.js'
 
 async function createOPFSRoot(rootName = 'wc-blocks') {
   const root = await navigator.storage.getDirectory()
@@ -53,7 +53,8 @@ function openIDB(name = 'wc-blocks') {
 }
 
 export async function createOPFSBlockstore(rootName = 'wc-blocks') {
-  if (supportsOPFS) {
+  if (supportsOPFS()) {
+    console.log('[Blockstore] Using OPFS');
     const { blocks } = await createOPFSRoot(rootName)
     const api = {
       async open() {},
@@ -98,7 +99,9 @@ export async function createOPFSBlockstore(rootName = 'wc-blocks') {
     return api
   }
 
+  console.log('[Blockstore] Falling back to IndexedDB');
   const db = await openIDB(rootName)
+  console.log('[Blockstore] IndexedDB opened successfully');
   const tx = (mode) => db.transaction('blocks', mode).objectStore('blocks')
   const api = {
     async open() {},

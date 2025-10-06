@@ -15,7 +15,21 @@ ReactDOM.createRoot(rootElement).render(
   </React.StrictMode>
 );
 
-startUI().catch((e) => {
-  console.error(e);
-  toast("Failed to start Helia/libp2p");
+// Wait for React to render DOM elements before starting UI
+function waitForElement(id, callback, attempts = 0) {
+  const el = document.getElementById(id);
+  if (el) {
+    callback();
+  } else if (attempts < 50) {
+    setTimeout(() => waitForElement(id, callback, attempts + 1), 100);
+  } else {
+    console.error(`Failed to find element #${id} after 5 seconds`);
+  }
+}
+
+waitForElement('dropzone', () => {
+  startUI().catch((e) => {
+    console.error(e);
+    toast("Failed to start Helia/libp2p");
+  });
 });

@@ -31,15 +31,9 @@ import { ROOM_TOPIC } from './constants.js'
  * - Auto-saves full state on every Y.js update
  */
 
-// ===== Persistence (OPFS + IndexedDB fallback) =====
+import { supportsOPFS } from './opfs-utils.js'
 
-async function hasOPFS() {
-  try {
-    return !!(navigator?.storage?.getDirectory);
-  } catch {
-    return false;
-  }
-}
+// ===== Persistence (OPFS + IndexedDB fallback) =====
 
 class OPFSPersistence {
   constructor(docName) {
@@ -136,7 +130,7 @@ class YDocPersistence {
   }
 
   async init() {
-    if (await hasOPFS()) {
+    if (supportsOPFS()) {
       const opfs = new OPFSPersistence(this.docName);
       if (await opfs.init()) {
         this.provider = opfs;

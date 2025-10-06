@@ -9,9 +9,9 @@
   "scripts": {
     "clean": "rimraf dist",
     "build": "vite build",
-    "dev": "vite",
+    "dev": "vite --host",
     "preview": "vite preview",
-    "start": "vite",
+    "start": "vite --host",
     "test": "node tests/smoke.mjs && node tests/router.mjs",
     "test:e2e": "playwright install --with-deps && playwright test",
     "relay": "node server/relay.js",

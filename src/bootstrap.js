@@ -276,6 +276,12 @@ export async function startUI() {
   const fileInput = $("file-input");
   const browse = $("btn-browse");
 
+  console.log('[startUI] Elements:', {
+    dropzone: !!dropzone,
+    fileInput: !!fileInput,
+    browse: !!browse
+  });
+
   let selectedFiles = [];
   function renderSelectedFiles() {
     const panel = $("selected-files-panel");
@@ -302,12 +308,14 @@ export async function startUI() {
     ul.replaceChildren(frag);
   }
 
-  browse.onclick = () => fileInput.click();
-  dropzone.ondragover = (e) => {
-    e.preventDefault();
-    dropzone.classList.add("bg-white");
-  };
-  dropzone.ondragleave = () => dropzone.classList.remove("bg-white");
+  if (browse) browse.onclick = () => fileInput.click();
+  if (dropzone) {
+    dropzone.ondragover = (e) => {
+      e.preventDefault();
+      dropzone.classList.add("bg-white");
+    };
+    dropzone.ondragleave = () => dropzone.classList.remove("bg-white");
+  }
 
   async function handleSelectedFiles(files) {
     const key = (f) => `${f.name}:${f.size}:${f.lastModified ?? 0}`;
@@ -328,12 +336,14 @@ export async function startUI() {
     }
   }
 
-  dropzone.ondrop = (e) => {
-    e.preventDefault();
-    dropzone.classList.remove("bg-white");
-    handleSelectedFiles(e.dataTransfer.files);
-  };
-  fileInput.onchange = () => handleSelectedFiles(fileInput.files);
+  if (dropzone) {
+    dropzone.ondrop = (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("bg-white");
+      handleSelectedFiles(e.dataTransfer.files);
+    };
+  }
+  if (fileInput) fileInput.onchange = () => handleSelectedFiles(fileInput.files);
 
   let creationInFlight = false;
 
@@ -388,7 +398,6 @@ export async function startUI() {
       goto("rooms", { room: room.id });
 
       await renderRoomsIfActive();
-      showInvite(buildInviteURL(room.id));
       toast("Room created and files pinned locally");
     } catch (err) {
       console.error("autoCreate failed", err);
