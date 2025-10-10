@@ -14,8 +14,10 @@
     "start": "vite --host",
     "test": "node tests/smoke.mjs && node tests/router.mjs",
     "test:e2e": "playwright install --with-deps && playwright test",
-    "relay": "node server/relay.js",
-    "tracker": "node server/tracker.js"
+    "hub": "node server/hub.js",
+    "hub:relay": "node server/hub.js --relay-only",
+    "hub:mirror": "node server/hub.js --mirror-only",
+    "hub:sync": "node server/hub.js --sync-only"
   },
   "dependencies": {
     "@chainsafe/libp2p-gossipsub": "^14.1.1",
@@ -39,6 +41,8 @@
     "datastore-level": "^11.0.4",
     "date-fns": "^3.6.0",
     "helia": "^5.0.0",
+    "it-pipe": "^3.0.1",
+    "it-pushable": "^3.2.3",
     "libp2p": "^2.8.12",
     "log-update": "^6.1.0",
     "pretty-ms": "^9.0.0",
@@ -46,6 +50,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "uint8arrays": "^5.1.0",
+    "ws": "^8.18.3",
+    "y-websocket": "^3.0.0",
     "yjs": "^13.6.27"
   },
   "devDependencies": {

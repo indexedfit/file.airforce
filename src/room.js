@@ -194,7 +194,7 @@ export function createRoomManager(helia, fs) {
 
     // If we have a manifest, we're the host - set it (only on first join)
     if (manifest && !alreadyJoined) {
-      console.log(`[Room ${roomId.slice(0, 6)}] Setting initial manifest as host`)
+      console.log(`[Room ${roomId.slice(0, 6)}] Setting initial manifest as host (${manifest.files?.length || 0} files)`)
       updateManifest(ydoc.manifest, manifest)
     }
 

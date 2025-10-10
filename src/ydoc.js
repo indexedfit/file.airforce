@@ -215,11 +215,15 @@ export async function createYDoc(roomId, libp2p) {
     console.warn('Persistence init failed:', err)
   }
 
-  // Broadcast updates to gossipsub
+  // ===== GOSSIPSUB-ONLY SYNC =====
+  // Broadcast Y.Doc updates to gossipsub mesh (including hubs)
   const updateHandler = (update, origin) => {
+    // Don't echo back network or storage updates
     if (origin === 'network' || origin === 'storage') return
+
     const peers = libp2p.services?.pubsub?.getSubscribers(topic) || []
-    console.log(`[${roomId.slice(0, 6)}] Broadcasting Y_UPDATE (${update.length} bytes) to ${peers.length} peers`)
+    console.log(`[${roomId.slice(0, 6)}] Broadcasting Y_UPDATE (${update.length} bytes) to ${peers.length} gossipsub peers`)
+
     libp2p.services?.pubsub?.publish(topic, enc({
       type: 'Y_UPDATE',
       update: Array.from(update),
@@ -306,6 +310,52 @@ export async function createYDoc(roomId, libp2p) {
     console.warn('Failed to subscribe:', err)
   }
 
+  // Notify hubs about this room (so they subscribe too)
+  // Do this asynchronously but start immediately - don't block room creation
+  ;(async () => {
+    const { TRACKERS } = await import('./constants.js')
+
+    for (const multiaddr of TRACKERS) {
+      try {
+        // Extract peer ID from multiaddr
+        const parts = multiaddr.split('/p2p/')
+        if (parts.length < 2) continue
+
+        const hubPeerIdStr = parts[parts.length - 1]
+        const { peerIdFromString } = await import('@libp2p/peer-id')
+        const hubPeerId = peerIdFromString(hubPeerIdStr)
+
+        // Dial the notification protocol
+        console.log(`[${roomId.slice(0, 6)}] Notifying hub ${hubPeerIdStr.slice(0, 16)} about room...`)
+
+        const stream = await libp2p.dialProtocol(hubPeerId, '/room-notify/1.0.0', {
+          signal: AbortSignal.timeout(5000)
+        })
+
+        // Send roomId
+        await stream.sink([enc({ roomId })])
+        await stream.close()
+
+        console.log(`[${roomId.slice(0, 6)}] ✓ Hub ${hubPeerIdStr.slice(0, 16)} notified`)
+
+        // Proactively send full state to hub via gossipsub
+        // Don't wait for SNAPSHOT_REQUEST - hub might not be in mesh yet
+        const fullState = Y.encodeStateAsUpdate(ydoc)
+        await libp2p.services?.pubsub?.publish(topic, enc({
+          type: 'SNAPSHOT',
+          update: Array.from(fullState),
+          roomId
+        }))
+
+        const files = manifest.get('files') || []
+        console.log(`[${roomId.slice(0, 6)}] Sent SNAPSHOT to hub (${fullState.length} bytes, ${files.length} files)`)
+      } catch (err) {
+        // Hub might be offline or not support protocol - that's ok, gossipsub still works
+        console.log(`[${roomId.slice(0, 6)}] Hub notification failed (using P2P mesh):`, err.message)
+      }
+    }
+  })()
+
   ydoc.on('update', updateHandler)
 
   // Track when we started trying to sync (for timeout)
@@ -366,8 +416,19 @@ export async function createYDoc(roomId, libp2p) {
   // Cleanup
   const destroy = () => {
     clearInterval(syncInterval)
+    clearInterval(hubRetryInterval)
     ydoc.off('update', updateHandler)
     if (persistenceUnbind) persistenceUnbind()
+
+    // Close hub stream
+    if (hubOutgoing) {
+      try {
+        hubOutgoing.end()
+      } catch {}
+      hubOutgoing = null
+      hubConnected = false
+    }
+
     try {
       libp2p.services?.pubsub?.removeEventListener('message', messageHandler)
       libp2p.services?.pubsub?.unsubscribe(topic)

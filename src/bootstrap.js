@@ -60,6 +60,7 @@ import {
   getRooms,
 } from "./store.js";
 import { addFilesAndCreateManifest, formatBytes } from "./file-manager.js";
+import { MIRROR_URL } from "./constants.js";
 
 // Peer info helpers
 function listAddresses(libp2p) {
@@ -378,6 +379,8 @@ export async function startUI() {
         } catch {}
       }
 
+      // Hub proactively pins files via manifest observer - no HTTP upload needed
+
       const room = {
         id: randId(),
         name: $("room-name")?.value?.trim() || defaultName,
@@ -390,7 +393,7 @@ export async function startUI() {
       saveRoom(room);
 
       // Join as host
-      rooms.join(room.id, { manifest });
+      await rooms.join(room.id, { manifest });
 
       renderDrops(getDrops().slice(0, 5), "drops-list");
 
@@ -421,7 +424,7 @@ export async function startUI() {
       try {
         const u = new URL(input);
         roomId = u.searchParams.get("room") || input;
-      } catch {}
+      } catch { }
       const existing = getRoom(roomId);
       if (!existing)
         saveRoom({
@@ -431,7 +434,6 @@ export async function startUI() {
           lastSeen: Date.now(),
         });
 
-      const existing = getRoom(roomId);
       await rooms.join(roomId, {
         onManifestUpdate: async (manifest) => {
           const room = getRoom(roomId);
@@ -476,6 +478,8 @@ export async function startUI() {
           for await (const _ of helia.pin.add(f.cid)) {}
         } catch {}
       }
+
+      // Hub proactively pins files via manifest observer - no HTTP upload needed
 
       await renderRoomsIfActive();
       toast("Files added to room");
@@ -524,7 +528,7 @@ export async function startUI() {
     // Join room (handles both host and joiner)
     await rooms.join(rid, {
       onManifestUpdate: async (manifest) => {
-        console.log(`[Bootstrap] onManifestUpdate called for room ${rid.slice(0,6)}: ${manifest.files.length} files`);
+        console.log(`[Bootstrap] onManifestUpdate called for room ${rid.slice(0, 6)}: ${manifest.files.length} files`);
         const room = getRoom(rid);
         saveRoom({
           id: rid,
@@ -553,7 +557,7 @@ export async function startUI() {
           showFetchProgress(true, i + 1, newCids.length, `${name} ${size}`.trim());
 
           try {
-            for await (const _ of helia.pin.add(cid)) {}
+            for await (const _ of helia.pin.add(cid)) { }
           } catch (err) {
             console.warn(`Failed to pin ${cid}:`, err.message);
           }
