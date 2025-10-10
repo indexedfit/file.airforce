@@ -16,6 +16,8 @@ import { createServer } from 'http'
 import { pushable } from 'it-pushable'
 import { pipe } from 'it-pipe'
 import * as Y from 'yjs'
+import { readFile, writeFile, mkdir } from 'fs/promises'
+import { existsSync } from 'fs'
 import { PUBSUB_PEER_DISCOVERY, ROOM_TOPIC } from '../src/constants.js'
 
 // ===== CLI FLAGS =====
@@ -42,15 +44,64 @@ const dec = (buf) => JSON.parse(new TextDecoder().decode(buf))
 // ===== Y.JS ROOM MANAGER =====
 // roomId -> { ydoc: Y.Doc, manifest: Y.Map, chat: Y.Array, streams: Map<peerId, pushable> }
 const rooms = new Map()
+const YDOCS_DIR = './data/ydocs'
 
-function getOrCreateRoom(roomId) {
+// Ensure ydocs directory exists
+async function ensureYDocsDir() {
+  if (!existsSync(YDOCS_DIR)) {
+    await mkdir(YDOCS_DIR, { recursive: true })
+  }
+}
+
+// Load Y.Doc state from disk
+async function loadYDocState(roomId) {
+  const filePath = `${YDOCS_DIR}/${roomId}.yjs`
+  try {
+    if (existsSync(filePath)) {
+      const data = await readFile(filePath)
+      console.log(`[Hub] Loaded Y.Doc state for room ${roomId.slice(0, 6)} (${data.length} bytes)`)
+      return new Uint8Array(data)
+    }
+  } catch (err) {
+    console.warn(`[Hub] Failed to load Y.Doc for room ${roomId.slice(0, 6)}:`, err.message)
+  }
+  return null
+}
+
+// Save Y.Doc state to disk
+async function saveYDocState(roomId, ydoc) {
+  const filePath = `${YDOCS_DIR}/${roomId}.yjs`
+  try {
+    const state = Y.encodeStateAsUpdate(ydoc)
+    await writeFile(filePath, state)
+    // console.log(`[Hub] Saved Y.Doc state for room ${roomId.slice(0, 6)} (${state.length} bytes)`)
+  } catch (err) {
+    console.warn(`[Hub] Failed to save Y.Doc for room ${roomId.slice(0, 6)}:`, err.message)
+  }
+}
+
+async function getOrCreateRoom(roomId) {
   if (!rooms.has(roomId)) {
     const ydoc = new Y.Doc()
     const manifest = ydoc.getMap('manifest')
     const chat = ydoc.getArray('chat')
     const streams = new Map()
 
-    console.log(`[Hub] Created Y.Doc for room ${roomId.slice(0, 6)}`)
+    // Load persisted state if available
+    const savedState = await loadYDocState(roomId)
+    if (savedState) {
+      Y.applyUpdate(ydoc, savedState)
+      const files = manifest.get('files') || []
+      const chatMsgs = chat.length
+      console.log(`[Hub] Restored room ${roomId.slice(0, 6)}: ${files.length} files, ${chatMsgs} chat msgs`)
+    } else {
+      console.log(`[Hub] Created new Y.Doc for room ${roomId.slice(0, 6)}`)
+    }
+
+    // Auto-save on every update
+    ydoc.on('update', () => {
+      saveYDocState(roomId, ydoc).catch(() => {})
+    })
 
     rooms.set(roomId, { ydoc, manifest, chat, streams })
   }
@@ -62,6 +113,11 @@ async function main() {
   const WS_PORT = process.env.PORT || 9004
   const TCP_PORT = process.env.TCP_PORT || 9003
   const HTTP_PORT = process.env.HTTP_PORT || 9007
+
+  // Ensure Y.Docs persistence directory exists
+  if (flags.sync) {
+    await ensureYDocsDir()
+  }
 
   // Initialize blockstore/datastore if mirror enabled
   let blockstore, datastore
@@ -157,7 +213,7 @@ async function main() {
         }
 
         roomId = firstMsg.roomId
-        room = getOrCreateRoom(roomId)
+        room = await getOrCreateRoom(roomId)
         room.streams.set(remotePeer, outgoing)
 
         console.log(`[Y-Sync] ${remotePeer.slice(-16)} joined room ${roomId.slice(0, 6)}`)
@@ -209,23 +265,30 @@ async function main() {
       if (!topic.startsWith('wc/')) return
 
       const roomId = topic.slice(3) // Extract roomId from "wc/<roomId>"
-      const room = rooms.get(roomId)
-      if (!room) return
 
-      try {
-        const msg = dec(evt.detail.data)
+        // Load room on demand (important for gossipsub-only peers)
+        ; (async () => {
+          try {
+            let room = rooms.get(roomId)
+            if (!room) {
+              console.log(`[Bridge] Loading room ${roomId.slice(0, 6)} from gossipsub activity`)
+              room = await getOrCreateRoom(roomId)
+            }
 
-        // Only bridge Y.js updates (not metadata like SNAPSHOT_REQUEST)
-        if (msg.type === 'Y_UPDATE' && msg.update) {
-          const update = new Uint8Array(msg.update)
-          console.log(`[Bridge] Gossipsub → Y.Doc: room ${roomId.slice(0, 6)}, ${update.length} bytes`)
+            const msg = dec(evt.detail.data)
 
-          // Apply to Y.Doc (this will trigger broadcast to streams)
-          Y.applyUpdate(room.ydoc, update, 'gossipsub')
-        }
-      } catch (err) {
-        console.warn('[Bridge] Failed to process gossipsub message:', err.message)
-      }
+            // Only bridge Y.js updates (not metadata like SNAPSHOT_REQUEST)
+            if (msg.type === 'Y_UPDATE' && msg.update) {
+              const update = new Uint8Array(msg.update)
+              console.log(`[Bridge] Gossipsub → Y.Doc: room ${roomId.slice(0, 6)}, ${update.length} bytes`)
+
+              // Apply to Y.Doc (this will trigger broadcast to streams)
+              Y.applyUpdate(room.ydoc, update, 'gossipsub')
+            }
+          } catch (err) {
+            console.warn('[Bridge] Failed to process gossipsub message:', err.message)
+          }
+        })()
     })
 
     // When Y.Doc updates, broadcast to both streams and gossipsub
@@ -265,8 +328,8 @@ async function main() {
 
     // Patch getOrCreateRoom to set up broadcast
     const originalGetOrCreateRoom = getOrCreateRoom
-    getOrCreateRoom = function(roomId) {
-      const room = originalGetOrCreateRoom(roomId)
+    getOrCreateRoom = async function (roomId) {
+      const room = await originalGetOrCreateRoom(roomId)
       if (!room._broadcastSetup) {
         setupRoomBroadcast(roomId, room.ydoc, room.streams)
         room._broadcastSetup = true
@@ -375,7 +438,7 @@ async function main() {
       else if (addr.includes('/p2p-circuit')) type = 'Circuit'
       byTransport[type] = (byTransport[type] || 0) + 1
     })
-    const transportStr = Object.entries(byTransport).map(([k,v]) => `${k}:${v}`).join(' ')
+    const transportStr = Object.entries(byTransport).map(([k, v]) => `${k}:${v}`).join(' ')
     console.log(`[Stats] ${conns.length} conns, ${peers.length} peers (${transportStr}), ${rooms.size} rooms`)
 
     // Room stats

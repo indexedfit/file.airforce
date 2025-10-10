@@ -18,7 +18,7 @@ export const TRACKERS = [
   // SYNC HUBS
   // 
   // ALL OF THE ABOVE?
-  "/ip4/127.0.0.1/tcp/9004/ws/p2p/12D3KooWMsQrTMYBCggmufG5hZKpDwVYgtmwWJNFxfy2QYPU9iWM"
+  "/ip4/127.0.0.1/tcp/9004/ws/p2p/12D3KooWKgGz5nXFjoXJv2xUHXT2ZSzoBiRVhgtdZcaw4x8TD9Z7"
 ];
 
 // Room pubsub base

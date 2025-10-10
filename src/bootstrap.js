@@ -382,40 +382,79 @@ export async function startUI() {
       // Upload blocks to mirror
       if (manifest.files.length > 0) {
         try {
+          console.log(`[Mirror] Starting upload for ${manifest.files.length} files to ${MIRROR_URL}`);
           const blocks = [];
+          const seen = new Set();
 
-          // Collect all blocks for each uploaded file
           for (const file of manifest.files) {
-            const cids = [file.cid];
-            // Walk the DAG to get all child blocks
-            for await (const link of fs.ls(file.cid)) {
-              if (link.cid) cids.push(link.cid);
-            }
+            console.log(`[Mirror] Collecting blocks for ${file.name} (${file.cid})`);
+            const queue = [file.cid];
 
-            // Fetch block bytes
-            for (const cid of cids) {
+            while (queue.length > 0) {
+              const cidStr = queue.shift();
+              if (seen.has(cidStr)) continue;
+              seen.add(cidStr);
+
               try {
+                // Parse CID string to CID object
+                const { CID } = await import('multiformats/cid');
+                const cid = CID.parse(cidStr);
                 const bytes = await helia.blockstore.get(cid);
+
+                // Convert Uint8Array to base64 without stack overflow
+                let binary = '';
+                for (let i = 0; i < bytes.length; i++) {
+                  binary += String.fromCharCode(bytes[i]);
+                }
                 blocks.push({
-                  cid: cid.toString(),
-                  bytes: btoa(String.fromCharCode(...bytes))
+                  cid: cidStr,
+                  bytes: btoa(binary)
                 });
-              } catch {}
+
+                // Try to parse as dag-pb to find links
+                try {
+                  const { decode } = await import('@ipld/dag-pb');
+                  const block = decode(bytes);
+                  if (block.Links) {
+                    for (const link of block.Links) {
+                      if (link.Hash) {
+                        queue.push(link.Hash.toString());
+                      }
+                    }
+                  }
+                } catch {
+                  // Not dag-pb or no links, that's ok
+                }
+              } catch (err) {
+                console.error(`[Mirror] Failed to get block ${cidStr}:`, err);
+              }
             }
           }
 
           if (blocks.length > 0) {
-            await fetch(MIRROR_URL, {
+            console.log(`[Mirror] Uploading ${blocks.length} blocks for ${manifest.files.length} files...`);
+            const response = await fetch(MIRROR_URL, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ blocks })
             });
-            console.log(`[Mirror] Uploaded ${blocks.length} blocks for ${manifest.files.length} files`);
+
+            if (!response.ok) {
+              console.error(`[Mirror] Upload failed with status ${response.status}`);
+              const text = await response.text();
+              console.error('[Mirror] Response:', text);
+            } else {
+              const result = await response.json();
+              console.log(`[Mirror] Upload complete: ${result.stored?.length || 0} stored, ${result.failed?.length || 0} failed`);
+            }
+          } else {
+            console.warn('[Mirror] No blocks collected!');
           }
         } catch (err) {
-          console.warn('[Mirror] Upload failed:', err.message);
+          console.error('[Mirror] Upload error:', err);
         }
       }
+
 
       const room = {
         id: randId(),
@@ -429,7 +468,7 @@ export async function startUI() {
       saveRoom(room);
 
       // Join as host
-      rooms.join(room.id, { manifest });
+      await rooms.join(room.id, { manifest });
 
       renderDrops(getDrops().slice(0, 5), "drops-list");
 
@@ -460,7 +499,7 @@ export async function startUI() {
       try {
         const u = new URL(input);
         roomId = u.searchParams.get("room") || input;
-      } catch {}
+      } catch { }
       const existing = getRoom(roomId);
       if (!existing)
         saveRoom({
@@ -519,34 +558,61 @@ export async function startUI() {
       if (added.files.length > 0) {
         try {
           const blocks = [];
+          const seen = new Set();
 
-          // Collect all blocks for each uploaded file
           for (const file of added.files) {
-            const cids = [file.cid];
-            // Walk the DAG to get all child blocks
-            for await (const link of fs.ls(file.cid)) {
-              if (link.cid) cids.push(link.cid);
-            }
+            // Use helia.blockstore to walk and collect all blocks
+            const queue = [file.cid];
 
-            // Fetch block bytes
-            for (const cid of cids) {
+            while (queue.length > 0) {
+              const cidStr = queue.shift();
+              if (seen.has(cidStr)) continue;
+              seen.add(cidStr);
+
               try {
+                // Parse CID string to CID object
+                const { CID } = await import('multiformats/cid');
+                const cid = CID.parse(cidStr);
                 const bytes = await helia.blockstore.get(cid);
+
+                // Convert Uint8Array to base64 without stack overflow
+                let binary = '';
+                for (let i = 0; i < bytes.length; i++) {
+                  binary += String.fromCharCode(bytes[i]);
+                }
                 blocks.push({
-                  cid: cid.toString(),
-                  bytes: btoa(String.fromCharCode(...bytes))
+                  cid: cidStr,
+                  bytes: btoa(binary)
                 });
-              } catch {}
+
+                // Try to parse as dag-pb to find links
+                try {
+                  const { decode } = await import('@ipld/dag-pb');
+                  const block = decode(bytes);
+                  if (block.Links) {
+                    for (const link of block.Links) {
+                      if (link.Hash) {
+                        queue.push(link.Hash.toString());
+                      }
+                    }
+                  }
+                } catch {
+                  // Not dag-pb or no links, that's ok
+                }
+              } catch (err) {
+                console.warn(`[Mirror] Failed to get block ${cidStr}:`, err.message);
+              }
             }
           }
 
           if (blocks.length > 0) {
+            console.log(`[Mirror] Uploading ${blocks.length} blocks for ${added.files.length} files...`);
             await fetch(MIRROR_URL, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ blocks })
             });
-            console.log(`[Mirror] Uploaded ${blocks.length} blocks for ${added.files.length} files`);
+            console.log(`[Mirror] Upload complete: ${blocks.length} blocks`);
           }
         } catch (err) {
           console.warn('[Mirror] Upload failed:', err.message);
@@ -600,7 +666,7 @@ export async function startUI() {
     // Join room (handles both host and joiner)
     await rooms.join(rid, {
       onManifestUpdate: async (manifest) => {
-        console.log(`[Bootstrap] onManifestUpdate called for room ${rid.slice(0,6)}: ${manifest.files.length} files`);
+        console.log(`[Bootstrap] onManifestUpdate called for room ${rid.slice(0, 6)}: ${manifest.files.length} files`);
         const room = getRoom(rid);
         saveRoom({
           id: rid,
@@ -629,7 +695,7 @@ export async function startUI() {
           showFetchProgress(true, i + 1, newCids.length, `${name} ${size}`.trim());
 
           try {
-            for await (const _ of helia.pin.add(cid)) {}
+            for await (const _ of helia.pin.add(cid)) { }
           } catch (err) {
             console.warn(`Failed to pin ${cid}:`, err.message);
           }

@@ -220,22 +220,25 @@ export async function createYDoc(roomId, libp2p) {
   // ===== HUB STREAM PROVIDER (Primary sync method) =====
   let hubOutgoing = null
   let hubConnected = false
+  let hubRetryInterval = null
 
   async function connectToHub() {
     try {
       // Try to find hub peer in connected peers (from TRACKERS)
       const peers = libp2p.getPeers()
       if (peers.length === 0) {
-        console.log(`[${roomId.slice(0, 6)}] No peers connected, skipping hub stream`)
+        console.log(`[${roomId.slice(0, 6)}] No peers connected yet, will retry hub stream later`)
         return false
       }
 
       // Try dialing the first connected peer that supports the protocol
       const Y_SYNC_PROTOCOL = '/y-sync/1.0.0'
 
+      console.log(`[${roomId.slice(0, 6)}] Attempting hub stream connection to ${peers.length} peer(s)`)
+
       for (const peerId of peers) {
         try {
-          console.log(`[${roomId.slice(0, 6)}] Attempting hub stream to peer ${peerId.toString().slice(-16)}...`)
+          console.log(`[${roomId.slice(0, 6)}] Trying ${Y_SYNC_PROTOCOL} with ${peerId.toString().slice(-16)}...`)
           const stream = await libp2p.dialProtocol(peerId, Y_SYNC_PROTOCOL, { signal: AbortSignal.timeout(5000) })
 
           // Create outgoing pushable
@@ -251,6 +254,9 @@ export async function createYDoc(roomId, libp2p) {
           hubConnected = true
           console.log(`[${roomId.slice(0, 6)}] Hub stream established with ${peerId.toString().slice(-16)}`)
 
+          // Stop retry interval since we're connected
+          if (hubRetryInterval) clearInterval(hubRetryInterval)
+
           // Listen for messages from hub
           ;(async () => {
             try {
@@ -258,11 +264,29 @@ export async function createYDoc(roomId, libp2p) {
                 const msg = dec(chunk.subarray())
 
                 if (msg.type === 'SYNC_FULL_STATE' && msg.update) {
-                  console.log(`[${roomId.slice(0, 6)}] Received SYNC_FULL_STATE from hub (${msg.update.length} bytes)`)
-                  Y.applyUpdate(ydoc, new Uint8Array(msg.update), 'hub-stream')
-                  syncState = 'synced'
-                  const files = manifest.get('files') || []
-                  console.log(`[${roomId.slice(0, 6)}] After hub sync: ${files.length} files`, files.map(f => f.name))
+                  const hubState = new Uint8Array(msg.update)
+                  const localFiles = manifest.get('files') || []
+
+                  console.log(`[${roomId.slice(0, 6)}] Received SYNC_FULL_STATE from hub (${hubState.length} bytes)`)
+                  console.log(`[${roomId.slice(0, 6)}] Local state: ${localFiles.length} files`)
+
+                  // If we have local state and hub is empty, send our state to hub
+                  if (hubState.length <= 2 && localFiles.length > 0) {
+                    console.log(`[${roomId.slice(0, 6)}] Hub is empty but we have ${localFiles.length} files - sending our state`)
+                    const ourState = Y.encodeStateAsUpdate(ydoc)
+                    outgoing.push(enc({
+                      type: 'Y_UPDATE',
+                      update: Array.from(ourState),
+                      roomId
+                    }))
+                    syncState = 'synced'
+                  } else {
+                    // Hub has data, merge it
+                    Y.applyUpdate(ydoc, hubState, 'hub-stream')
+                    syncState = 'synced'
+                    const files = manifest.get('files') || []
+                    console.log(`[${roomId.slice(0, 6)}] After hub sync: ${files.length} files`, files.map(f => f.name))
+                  }
                 }
                 else if (msg.type === 'Y_UPDATE' && msg.update) {
                   console.log(`[${roomId.slice(0, 6)}] Received Y_UPDATE from hub (${msg.update.length} bytes)`)
@@ -284,20 +308,32 @@ export async function createYDoc(roomId, libp2p) {
           return true
         } catch (err) {
           // This peer doesn't support the protocol, try next
+          console.log(`[${roomId.slice(0, 6)}] Peer ${peerId.toString().slice(-16)} doesn't support ${Y_SYNC_PROTOCOL}: ${err.message}`)
           continue
         }
       }
 
-      console.log(`[${roomId.slice(0, 6)}] No hub peers found with ${Y_SYNC_PROTOCOL}`)
+      console.log(`[${roomId.slice(0, 6)}] No peers support ${Y_SYNC_PROTOCOL}, falling back to gossipsub`)
       return false
     } catch (err) {
-      console.warn(`[${roomId.slice(0, 6)}] Hub connection failed:`, err.message)
+      console.warn(`[${roomId.slice(0, 6)}] Hub connection error:`, err.message)
       return false
     }
   }
 
   // Try connecting to hub after a delay (let libp2p connect to bootstrap peers first)
   setTimeout(() => connectToHub(), 1000)
+
+  // Retry hub connection periodically if not connected
+  hubRetryInterval = setInterval(() => {
+    if (!hubConnected) {
+      const peers = libp2p.getPeers()
+      if (peers.length > 0) {
+        console.log(`[${roomId.slice(0, 6)}] Retrying hub connection (not connected, ${peers.length} peers available)`)
+        connectToHub()
+      }
+    }
+  }, 5000)
 
   // Broadcast updates to both hub stream and gossipsub
   const updateHandler = (update, origin) => {
@@ -467,6 +503,7 @@ export async function createYDoc(roomId, libp2p) {
   // Cleanup
   const destroy = () => {
     clearInterval(syncInterval)
+    clearInterval(hubRetryInterval)
     ydoc.off('update', updateHandler)
     if (persistenceUnbind) persistenceUnbind()
 
