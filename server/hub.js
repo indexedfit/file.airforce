@@ -342,6 +342,62 @@ async function main() {
     }
   }
 
+  // ===== PROACTIVE PINNING =====
+  if (flags.mirror && helia) {
+    // Track pinned CIDs globally to avoid redundant pins
+    const pinnedCids = new Set()
+
+    // Monkey-patch getOrCreateRoom to add manifest observer
+    const originalGetOrCreateRoom = getOrCreateRoom
+    getOrCreateRoom = async function (roomId) {
+      const room = await originalGetOrCreateRoom(roomId)
+
+      // Set up manifest observer if not already done
+      if (!room._pinningSetup) {
+        room._pinningSetup = true
+
+        const manifestObserver = () => {
+          const files = room.manifest.get('files') || []
+
+          for (const file of files) {
+            if (!pinnedCids.has(file.cid)) {
+              pinnedCids.add(file.cid) // Mark as processing
+
+              // Pin asynchronously via bitswap
+              ;(async () => {
+                try {
+                  const cidObj = CID.parse(file.cid)
+
+                  // Pin triggers bitswap fetch if we don't have blocks
+                  console.log(`[Hub] Auto-pinning ${file.name} (${file.cid.slice(0, 12)}...)`)
+
+                  for await (const _ of helia.pins.add(cidObj)) {
+                    // Iteration completes when fully pinned
+                  }
+
+                  console.log(`[Hub] ✓ Pinned ${file.name}`)
+                } catch (err) {
+                  console.warn(`[Hub] Failed to pin ${file.name}:`, err.message)
+                  pinnedCids.delete(file.cid) // Allow retry
+                }
+              })()
+            }
+          }
+        }
+
+        // Attach observer
+        room.manifest.observe(manifestObserver)
+
+        // Trigger initial pin for existing files
+        manifestObserver()
+      }
+
+      return room
+    }
+
+    console.log('[Hub] Proactive pinning enabled')
+  }
+
   // ===== MIRROR HTTP API =====
   if (flags.mirror) {
     const server = createServer(async (req, res) => {
