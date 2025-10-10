@@ -13,7 +13,12 @@ export const TRACKERS = [
   // 
   // MIRRORS
   //
-  "/ip4/127.0.0.1/tcp/9005/ws/p2p/12D3KooWChPALZBKufsz6p26J3EdGm1x2WiBGSZJpKzursnro8hG",
+  // RELAYS
+  //
+  // SYNC HUBS
+  // 
+  // ALL OF THE ABOVE?
+  "/ip4/127.0.0.1/tcp/9004/ws/p2p/12D3KooWMsQrTMYBCggmufG5hZKpDwVYgtmwWJNFxfy2QYPU9iWM"
 ];
 
 // Room pubsub base
@@ -25,4 +30,7 @@ export const LS_ROOMS = "wc:rooms";
 export const LS_PEERS = "wc:peers";
 
 // Mirror server for persistent storage
-export const MIRROR_URL = import.meta.env.VITE_MIRROR_URL || "http://localhost:9007/upload";
+// Browser: use Vite env vars, Node: use process.env
+export const MIRROR_URL = (typeof import.meta.env !== 'undefined'
+  ? import.meta.env.VITE_MIRROR_URL
+  : process.env.VITE_MIRROR_URL) || "http://localhost:9007/upload";

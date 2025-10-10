@@ -379,6 +379,44 @@ export async function startUI() {
         } catch {}
       }
 
+      // Upload blocks to mirror
+      if (manifest.files.length > 0) {
+        try {
+          const blocks = [];
+
+          // Collect all blocks for each uploaded file
+          for (const file of manifest.files) {
+            const cids = [file.cid];
+            // Walk the DAG to get all child blocks
+            for await (const link of fs.ls(file.cid)) {
+              if (link.cid) cids.push(link.cid);
+            }
+
+            // Fetch block bytes
+            for (const cid of cids) {
+              try {
+                const bytes = await helia.blockstore.get(cid);
+                blocks.push({
+                  cid: cid.toString(),
+                  bytes: btoa(String.fromCharCode(...bytes))
+                });
+              } catch {}
+            }
+          }
+
+          if (blocks.length > 0) {
+            await fetch(MIRROR_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ blocks })
+            });
+            console.log(`[Mirror] Uploaded ${blocks.length} blocks for ${manifest.files.length} files`);
+          }
+        } catch (err) {
+          console.warn('[Mirror] Upload failed:', err.message);
+        }
+      }
+
       const room = {
         id: randId(),
         name: $("room-name")?.value?.trim() || defaultName,
