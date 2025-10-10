@@ -116,8 +116,24 @@ export async function startHelia() {
     }
   })
 
-  libp2p.addEventListener('peer:connect', (evt) => {
+  libp2p.addEventListener('peer:connect', async (evt) => {
     const remotePeer = evt.detail
+    const peerId = remotePeer.toString()
+
+    // Check if this is a hub from TRACKERS
+    const isHub = TRACKERS.some(addr => addr.includes(peerId))
+    if (isHub) {
+      try {
+        await libp2p.peerStore.merge(remotePeer, {
+          tags: { 'direct-peer': { value: 100 } }
+        })
+        console.log(`[Gossipsub] ✓ Tagged hub ${peerId.slice(0, 16)} as direct peer`)
+      } catch (err) {
+        console.warn(`[Gossipsub] Failed to tag hub as direct peer:`, err.message)
+      }
+    }
+
+    // Log circuit relay connections
     const conns = libp2p.getConnections(remotePeer)
     conns.forEach(conn => {
       if (conn.remoteAddr.toString().includes('/p2p-circuit')) {
@@ -135,36 +151,6 @@ export async function startHelia() {
 
   // Start Helia (starts its libp2p internally)
   if (typeof helia.start === "function") await helia.start();
-
-  // Tag hub peers as "direct peers" for fast gossipsub delivery
-  // This gives stream-like latency to known hubs without special protocols
-  setTimeout(async () => {
-    for (const multiaddr of TRACKERS) {
-      try {
-        // Extract peer ID from multiaddr string
-        const parts = multiaddr.split('/p2p/')
-        if (parts.length < 2) continue
-
-        const hubPeerIdStr = parts[parts.length - 1]
-        console.log(`[Gossipsub] Tagging hub as direct peer: ${hubPeerIdStr.slice(0, 16)}...`)
-
-        // Import peerIdFromString to parse the peer ID
-        const { peerIdFromString } = await import('@libp2p/peer-id')
-        const hubPeerId = peerIdFromString(hubPeerIdStr)
-
-        // Tag as direct peer (gossipsub will prioritize and send directly)
-        await libp2p.peerStore.merge(hubPeerId, {
-          tags: {
-            'direct-peer': { value: 100 } // High priority
-          }
-        })
-
-        console.log(`[Gossipsub] ✓ Tagged ${hubPeerIdStr.slice(0, 16)} as direct peer`)
-      } catch (err) {
-        console.warn(`[Gossipsub] Failed to tag hub as direct peer:`, err.message)
-      }
-    }
-  }, 3000) // Wait for bootstrap connections
 
   return { helia, fs, libp2p };
 }
