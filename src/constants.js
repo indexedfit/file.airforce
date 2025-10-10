@@ -18,10 +18,10 @@ export const TRACKERS = [
   // SYNC HUBS
   // 
   // ALL OF THE ABOVE?
-  "/ip4/127.0.0.1/tcp/9004/ws/p2p/12D3KooWCSGZ5jboqDHvm7yNmdtSGGE3x948wH3F5NUigZytGyhL"
+  "/ip4/127.0.0.1/tcp/9004/ws/p2p/12D3KooWJrVLhVDX9XgC2ur2hSTLP2Wh7dBUGEK764HUAe9kjUew"
 ];
 
-// Room pubsub base
+// Room pubsub topics
 export const ROOM_TOPIC = (roomId) => `wc/${roomId}`;
 
 // Local storage keys

@@ -1,7 +1,5 @@
 // @ts-check
 import * as Y from 'yjs'
-import { pushable } from 'it-pushable'
-import { pipe } from 'it-pipe'
 import { ROOM_TOPIC } from './constants.js'
 
 /**
@@ -217,146 +215,15 @@ export async function createYDoc(roomId, libp2p) {
     console.warn('Persistence init failed:', err)
   }
 
-  // ===== HUB STREAM PROVIDER (Primary sync method) =====
-  let hubOutgoing = null
-  let hubConnected = false
-  let hubRetryInterval = null
-
-  async function connectToHub() {
-    try {
-      // Try to find hub peer in connected peers (from TRACKERS)
-      const peers = libp2p.getPeers()
-      if (peers.length === 0) {
-        console.log(`[${roomId.slice(0, 6)}] No peers connected yet, will retry hub stream later`)
-        return false
-      }
-
-      // Try dialing the first connected peer that supports the protocol
-      const Y_SYNC_PROTOCOL = '/y-sync/1.0.0'
-
-      console.log(`[${roomId.slice(0, 6)}] Attempting hub stream connection to ${peers.length} peer(s)`)
-
-      for (const peerId of peers) {
-        try {
-          console.log(`[${roomId.slice(0, 6)}] Trying ${Y_SYNC_PROTOCOL} with ${peerId.toString().slice(-16)}...`)
-          const stream = await libp2p.dialProtocol(peerId, Y_SYNC_PROTOCOL, { signal: AbortSignal.timeout(5000) })
-
-          // Create outgoing pushable
-          const outgoing = pushable({ objectMode: false })
-          hubOutgoing = outgoing
-
-          // Pipe outgoing to stream sink
-          pipe(outgoing, stream.sink)
-
-          // Send JOIN_ROOM message
-          outgoing.push(enc({ type: 'JOIN_ROOM', roomId }))
-
-          hubConnected = true
-          console.log(`[${roomId.slice(0, 6)}] Hub stream established with ${peerId.toString().slice(-16)}`)
-
-          // Stop retry interval since we're connected
-          if (hubRetryInterval) clearInterval(hubRetryInterval)
-
-          // Listen for messages from hub
-          ;(async () => {
-            try {
-              for await (const chunk of stream.source) {
-                const msg = dec(chunk.subarray())
-
-                if (msg.type === 'SYNC_FULL_STATE' && msg.update) {
-                  const hubState = new Uint8Array(msg.update)
-                  const localFiles = manifest.get('files') || []
-
-                  console.log(`[${roomId.slice(0, 6)}] Received SYNC_FULL_STATE from hub (${hubState.length} bytes)`)
-                  console.log(`[${roomId.slice(0, 6)}] Local state: ${localFiles.length} files`)
-
-                  // If we have local state and hub is empty, send our state to hub
-                  if (hubState.length <= 2 && localFiles.length > 0) {
-                    console.log(`[${roomId.slice(0, 6)}] Hub is empty but we have ${localFiles.length} files - sending our state`)
-                    const ourState = Y.encodeStateAsUpdate(ydoc)
-                    outgoing.push(enc({
-                      type: 'Y_UPDATE',
-                      update: Array.from(ourState),
-                      roomId
-                    }))
-                    syncState = 'synced'
-                  } else {
-                    // Hub has data, merge it
-                    Y.applyUpdate(ydoc, hubState, 'hub-stream')
-                    syncState = 'synced'
-                    const files = manifest.get('files') || []
-                    console.log(`[${roomId.slice(0, 6)}] After hub sync: ${files.length} files`, files.map(f => f.name))
-                  }
-                }
-                else if (msg.type === 'Y_UPDATE' && msg.update) {
-                  console.log(`[${roomId.slice(0, 6)}] Received Y_UPDATE from hub (${msg.update.length} bytes)`)
-                  Y.applyUpdate(ydoc, new Uint8Array(msg.update), 'hub-stream')
-                  if (syncState !== 'synced') {
-                    syncState = 'synced'
-                  }
-                }
-              }
-            } catch (err) {
-              console.warn(`[${roomId.slice(0, 6)}] Hub stream closed:`, err.message)
-            } finally {
-              hubConnected = false
-              hubOutgoing = null
-              console.log(`[${roomId.slice(0, 6)}] Hub stream disconnected, falling back to gossipsub`)
-            }
-          })()
-
-          return true
-        } catch (err) {
-          // This peer doesn't support the protocol, try next
-          console.log(`[${roomId.slice(0, 6)}] Peer ${peerId.toString().slice(-16)} doesn't support ${Y_SYNC_PROTOCOL}: ${err.message}`)
-          continue
-        }
-      }
-
-      console.log(`[${roomId.slice(0, 6)}] No peers support ${Y_SYNC_PROTOCOL}, falling back to gossipsub`)
-      return false
-    } catch (err) {
-      console.warn(`[${roomId.slice(0, 6)}] Hub connection error:`, err.message)
-      return false
-    }
-  }
-
-  // Try connecting to hub after a delay (let libp2p connect to bootstrap peers first)
-  setTimeout(() => connectToHub(), 1000)
-
-  // Retry hub connection periodically if not connected
-  hubRetryInterval = setInterval(() => {
-    if (!hubConnected) {
-      const peers = libp2p.getPeers()
-      if (peers.length > 0) {
-        console.log(`[${roomId.slice(0, 6)}] Retrying hub connection (not connected, ${peers.length} peers available)`)
-        connectToHub()
-      }
-    }
-  }, 5000)
-
-  // Broadcast updates to both hub stream and gossipsub
+  // ===== GOSSIPSUB-ONLY SYNC =====
+  // Broadcast Y.Doc updates to gossipsub mesh (including hubs)
   const updateHandler = (update, origin) => {
-    if (origin === 'network' || origin === 'storage' || origin === 'hub-stream') return
+    // Don't echo back network or storage updates
+    if (origin === 'network' || origin === 'storage') return
 
-    // Send to hub stream if connected
-    if (hubConnected && hubOutgoing) {
-      try {
-        hubOutgoing.push(enc({
-          type: 'Y_UPDATE',
-          update: Array.from(update),
-          roomId
-        }))
-      } catch (err) {
-        console.warn(`[${roomId.slice(0, 6)}] Hub stream send failed:`, err.message)
-        hubConnected = false
-        hubOutgoing = null
-      }
-    }
-
-    // Always also broadcast to gossipsub (fallback + P2P mesh)
     const peers = libp2p.services?.pubsub?.getSubscribers(topic) || []
-    console.log(`[${roomId.slice(0, 6)}] Broadcasting Y_UPDATE (${update.length} bytes) to hub:${hubConnected} + ${peers.length} gossipsub peers`)
+    console.log(`[${roomId.slice(0, 6)}] Broadcasting Y_UPDATE (${update.length} bytes) to ${peers.length} gossipsub peers`)
+
     libp2p.services?.pubsub?.publish(topic, enc({
       type: 'Y_UPDATE',
       update: Array.from(update),
@@ -442,6 +309,52 @@ export async function createYDoc(roomId, libp2p) {
   } catch (err) {
     console.warn('Failed to subscribe:', err)
   }
+
+  // Notify hubs about this room (so they subscribe too)
+  // Do this asynchronously but start immediately - don't block room creation
+  ;(async () => {
+    const { TRACKERS } = await import('./constants.js')
+
+    for (const multiaddr of TRACKERS) {
+      try {
+        // Extract peer ID from multiaddr
+        const parts = multiaddr.split('/p2p/')
+        if (parts.length < 2) continue
+
+        const hubPeerIdStr = parts[parts.length - 1]
+        const { peerIdFromString } = await import('@libp2p/peer-id')
+        const hubPeerId = peerIdFromString(hubPeerIdStr)
+
+        // Dial the notification protocol
+        console.log(`[${roomId.slice(0, 6)}] Notifying hub ${hubPeerIdStr.slice(0, 16)} about room...`)
+
+        const stream = await libp2p.dialProtocol(hubPeerId, '/room-notify/1.0.0', {
+          signal: AbortSignal.timeout(5000)
+        })
+
+        // Send roomId
+        await stream.sink([enc({ roomId })])
+        await stream.close()
+
+        console.log(`[${roomId.slice(0, 6)}] ✓ Hub ${hubPeerIdStr.slice(0, 16)} notified`)
+
+        // Proactively send full state to hub via gossipsub
+        // Don't wait for SNAPSHOT_REQUEST - hub might not be in mesh yet
+        const fullState = Y.encodeStateAsUpdate(ydoc)
+        await libp2p.services?.pubsub?.publish(topic, enc({
+          type: 'SNAPSHOT',
+          update: Array.from(fullState),
+          roomId
+        }))
+
+        const files = manifest.get('files') || []
+        console.log(`[${roomId.slice(0, 6)}] Sent SNAPSHOT to hub (${fullState.length} bytes, ${files.length} files)`)
+      } catch (err) {
+        // Hub might be offline or not support protocol - that's ok, gossipsub still works
+        console.log(`[${roomId.slice(0, 6)}] Hub notification failed (using P2P mesh):`, err.message)
+      }
+    }
+  })()
 
   ydoc.on('update', updateHandler)
 

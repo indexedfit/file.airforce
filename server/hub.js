@@ -13,8 +13,6 @@ import { FsBlockstore } from 'blockstore-fs'
 import { LevelDatastore } from 'datastore-level'
 import { CID } from 'multiformats/cid'
 import { createServer } from 'http'
-import { pushable } from 'it-pushable'
-import { pipe } from 'it-pipe'
 import * as Y from 'yjs'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -36,13 +34,12 @@ if (!anyOnly) {
 
 console.log('Hub modes:', flags)
 
-// ===== Y.JS PROTOCOL CONSTANTS =====
-const Y_SYNC_PROTOCOL = '/y-sync/1.0.0'
+// ===== ENCODING HELPERS =====
 const enc = (obj) => new TextEncoder().encode(JSON.stringify(obj))
 const dec = (buf) => JSON.parse(new TextDecoder().decode(buf))
 
 // ===== Y.JS ROOM MANAGER =====
-// roomId -> { ydoc: Y.Doc, manifest: Y.Map, chat: Y.Array, streams: Map<peerId, pushable> }
+// roomId -> { ydoc: Y.Doc, manifest: Y.Map, chat: Y.Array }
 const rooms = new Map()
 const YDOCS_DIR = './data/ydocs'
 
@@ -85,7 +82,6 @@ async function getOrCreateRoom(roomId) {
     const ydoc = new Y.Doc()
     const manifest = ydoc.getMap('manifest')
     const chat = ydoc.getArray('chat')
-    const streams = new Map()
 
     // Load persisted state if available
     const savedState = await loadYDocState(roomId)
@@ -103,7 +99,7 @@ async function getOrCreateRoom(roomId) {
       saveYDocState(roomId, ydoc).catch(() => {})
     })
 
-    rooms.set(roomId, { ydoc, manifest, chat, streams })
+    rooms.set(roomId, { ydoc, manifest, chat })
   }
   return rooms.get(roomId)
 }
@@ -184,119 +180,114 @@ async function main() {
     console.log('[Mirror] Helia initialized')
   }
 
-  // ===== Y.JS SYNC PROTOCOL =====
+  // ===== ROOM NOTIFICATION PROTOCOL =====
   if (flags.sync) {
-    await libp2p.handle(Y_SYNC_PROTOCOL, async ({ stream, connection }) => {
+    // Simple protocol: browsers notify hub of new rooms
+    await libp2p.handle('/room-notify/1.0.0', async ({ stream, connection }) => {
       const remotePeer = connection.remotePeer.toString()
-      console.log(`[Y-Sync] New stream from ${remotePeer.slice(-16)}`)
-
-      const outgoing = pushable({ objectMode: false })
-      let roomId = null
-      let room = null
 
       try {
-        // Pipe outgoing messages to sink
-        pipe(outgoing, stream.sink)
-
-        // Read messages from source
-        const reader = stream.source[Symbol.asyncIterator]()
-
-        // Read first message (JOIN_ROOM)
-        const { value: firstChunk, done: firstDone } = await reader.next()
-        if (firstDone || !firstChunk) {
-          throw new Error('No JOIN_ROOM message received')
+        // Read roomId from stream
+        const chunks = []
+        for await (const chunk of stream.source) {
+          chunks.push(chunk.subarray())
         }
 
-        const firstMsg = dec(firstChunk.subarray())
-        if (firstMsg.type !== 'JOIN_ROOM' || !firstMsg.roomId) {
-          throw new Error('First message must be JOIN_ROOM with roomId')
+        const data = Buffer.concat(chunks)
+        const { roomId } = dec(data)
+
+        if (!roomId) {
+          console.warn(`[Notify] Received invalid notification from ${remotePeer.slice(-16)}`)
+          return
         }
 
-        roomId = firstMsg.roomId
-        room = await getOrCreateRoom(roomId)
-        room.streams.set(remotePeer, outgoing)
+        console.log(`[Notify] Room ${roomId.slice(0, 6)} announced by ${remotePeer.slice(-16)}`)
 
-        console.log(`[Y-Sync] ${remotePeer.slice(-16)} joined room ${roomId.slice(0, 6)}`)
+        // Load room (triggers gossipsub subscription - synchronous)
+        const room = await getOrCreateRoom(roomId)
 
-        // Send full state immediately
-        const fullState = Y.encodeStateAsUpdate(room.ydoc)
-        outgoing.push(enc({
-          type: 'SYNC_FULL_STATE',
-          update: Array.from(fullState),
+        console.log(`[Notify] ✓ Subscribed to room ${roomId.slice(0, 6)}`)
+
+        // Request full state from the peer that just notified us
+        // Subscription is active now, publish immediately
+        const topic = ROOM_TOPIC(roomId)
+        await libp2p.services.pubsub.publish(topic, enc({
+          type: 'SNAPSHOT_REQUEST',
           roomId
         }))
 
-        console.log(`[Y-Sync] Sent full state (${fullState.length} bytes) to ${remotePeer.slice(-16)}`)
-
-        // Listen for subsequent updates
-        for await (const chunk of reader) {
-          try {
-            const msg = dec(chunk.subarray())
-
-            if (msg.type === 'Y_UPDATE' && msg.update) {
-              const update = new Uint8Array(msg.update)
-              console.log(`[Y-Sync] Received Y_UPDATE (${update.length} bytes) from ${remotePeer.slice(-16)}`)
-
-              // Apply to local Y.Doc (triggers broadcast to other streams + gossipsub)
-              Y.applyUpdate(room.ydoc, update, 'stream')
-            }
-          } catch (err) {
-            console.warn(`[Y-Sync] Failed to process message:`, err.message)
-          }
-        }
-
+        console.log(`[Notify] Requested SNAPSHOT for room ${roomId.slice(0, 6)}`)
       } catch (err) {
-        console.error(`[Y-Sync] Stream error:`, err.message)
+        console.warn(`[Notify] Failed to process notification:`, err.message)
       } finally {
-        if (room && remotePeer) {
-          room.streams.delete(remotePeer)
-          console.log(`[Y-Sync] ${remotePeer.slice(-16)} left room ${roomId?.slice(0, 6) || 'unknown'}`)
-        }
-        outgoing.end()
+        stream.close()
       }
     })
 
-    console.log(`[Y-Sync] Protocol handler registered: ${Y_SYNC_PROTOCOL}`)
+    console.log('[Notify] Room notification protocol registered: /room-notify/1.0.0')
+  }
 
-    // ===== GOSSIPSUB ↔ STREAM BRIDGE =====
-    // Listen to all room topics and bridge to streams
+  // ===== GOSSIPSUB SYNC (SIMPLIFIED) =====
+  if (flags.sync) {
+    // Listen to all room topics
     libp2p.services.pubsub.addEventListener('message', (evt) => {
       const topic = evt.detail.topic
       if (!topic.startsWith('wc/')) return
 
       const roomId = topic.slice(3) // Extract roomId from "wc/<roomId>"
 
-        // Load room on demand (important for gossipsub-only peers)
-        ; (async () => {
-          try {
-            let room = rooms.get(roomId)
-            if (!room) {
-              console.log(`[Bridge] Loading room ${roomId.slice(0, 6)} from gossipsub activity`)
-              room = await getOrCreateRoom(roomId)
-            }
-
-            const msg = dec(evt.detail.data)
-
-            // Only bridge Y.js updates (not metadata like SNAPSHOT_REQUEST)
-            if (msg.type === 'Y_UPDATE' && msg.update) {
-              const update = new Uint8Array(msg.update)
-              console.log(`[Bridge] Gossipsub → Y.Doc: room ${roomId.slice(0, 6)}, ${update.length} bytes`)
-
-              // Apply to Y.Doc (this will trigger broadcast to streams)
-              Y.applyUpdate(room.ydoc, update, 'gossipsub')
-            }
-          } catch (err) {
-            console.warn('[Bridge] Failed to process gossipsub message:', err.message)
+      // Load room on demand
+      ;(async () => {
+        try {
+          let room = rooms.get(roomId)
+          if (!room) {
+            console.log(`[Gossipsub] Loading room ${roomId.slice(0, 6)} from activity`)
+            room = await getOrCreateRoom(roomId)
           }
-        })()
+
+          const msg = dec(evt.detail.data)
+
+          // Handle different message types
+          if (msg.type === 'Y_UPDATE' && msg.update) {
+            const update = new Uint8Array(msg.update)
+            console.log(`[Gossipsub] Received Y_UPDATE for room ${roomId.slice(0, 6)}: ${update.length} bytes`)
+            Y.applyUpdate(room.ydoc, update, 'gossipsub')
+          }
+          else if (msg.type === 'SNAPSHOT' && msg.update) {
+            const update = new Uint8Array(msg.update)
+            console.log(`[Gossipsub] Received SNAPSHOT for room ${roomId.slice(0, 6)}: ${update.length} bytes`)
+            Y.applyUpdate(room.ydoc, update, 'gossipsub')
+
+            const files = room.manifest.get('files') || []
+            console.log(`[Gossipsub] After SNAPSHOT: ${files.length} files`)
+          }
+          else if (msg.type === 'SNAPSHOT_REQUEST') {
+            // Peer wants full state - send it
+            const fullState = Y.encodeStateAsUpdate(room.ydoc)
+            const files = room.manifest.get('files') || []
+            console.log(`[Gossipsub] SNAPSHOT_REQUEST for room ${roomId.slice(0, 6)} -> sending ${fullState.length} bytes, ${files.length} files`)
+
+            libp2p.services.pubsub.publish(ROOM_TOPIC(roomId), enc({
+              type: 'SNAPSHOT',
+              update: Array.from(fullState),
+              roomId
+            })).catch(err => {
+              if (!err.message?.includes('NoPeersSubscribedToTopic')) {
+                console.warn(`[Gossipsub] SNAPSHOT publish failed:`, err.message)
+              }
+            })
+          }
+        } catch (err) {
+          console.warn('[Gossipsub] Failed to process message:', err.message)
+        }
+      })()
     })
 
-    // When Y.Doc updates, broadcast to both streams and gossipsub
-    // (We'll set up observers when rooms are created)
-    function setupRoomBroadcast(roomId, ydoc, streams) {
+    // When Y.Doc updates, broadcast to gossipsub
+    function setupRoomBroadcast(roomId, ydoc) {
       ydoc.on('update', (update, origin) => {
-        // Don't echo back to the origin
-        if (origin === 'gossipsub' || origin === 'stream') return
+        // Don't echo back to gossipsub
+        if (origin === 'gossipsub') return
 
         const updateMsg = enc({
           type: 'Y_UPDATE',
@@ -304,25 +295,15 @@ async function main() {
           roomId
         })
 
-        // Broadcast to all connected streams
-        streams.forEach((outgoing, peerId) => {
-          try {
-            outgoing.push(updateMsg)
-          } catch (err) {
-            console.warn(`[Y-Sync] Failed to send to ${peerId.slice(-16)}:`, err.message)
-            streams.delete(peerId)
-          }
-        })
-
-        // Broadcast to gossipsub
+        // Broadcast to gossipsub mesh
         libp2p.services.pubsub.publish(ROOM_TOPIC(roomId), updateMsg)
           .catch(err => {
             if (!err.message?.includes('NoPeersSubscribedToTopic')) {
-              console.warn(`[Bridge] Gossipsub publish failed:`, err.message)
+              console.warn(`[Gossipsub] Publish failed:`, err.message)
             }
           })
 
-        console.log(`[Bridge] Y.Doc → Streams (${streams.size}) + Gossipsub: ${update.length} bytes`)
+        console.log(`[Gossipsub] Broadcasting Y_UPDATE for room ${roomId.slice(0, 6)}: ${update.length} bytes`)
       })
     }
 
@@ -331,15 +312,17 @@ async function main() {
     getOrCreateRoom = async function (roomId) {
       const room = await originalGetOrCreateRoom(roomId)
       if (!room._broadcastSetup) {
-        setupRoomBroadcast(roomId, room.ydoc, room.streams)
+        setupRoomBroadcast(roomId, room.ydoc)
         room._broadcastSetup = true
 
         // Subscribe to gossipsub topic for this room
         libp2p.services.pubsub.subscribe(ROOM_TOPIC(roomId))
-        console.log(`[Bridge] Subscribed to gossipsub topic: ${ROOM_TOPIC(roomId)}`)
+        console.log(`[Gossipsub] Subscribed to topic: ${ROOM_TOPIC(roomId)}`)
       }
       return room
     }
+
+    console.log('[Gossipsub] Sync enabled (no special protocols, just pubsub)')
   }
 
   // ===== PROACTIVE PINNING =====
@@ -396,6 +379,36 @@ async function main() {
     }
 
     console.log('[Hub] Proactive pinning enabled')
+  }
+
+  // ===== LOAD PERSISTED ROOMS ON STARTUP =====
+  if (flags.sync) {
+    // Subscribe to all persisted room topics so we can receive gossipsub messages
+    setTimeout(async () => {
+      try {
+        const { readdir } = await import('fs/promises')
+        const files = await readdir(YDOCS_DIR)
+
+        console.log(`[Startup] Found ${files.length} persisted rooms, loading...`)
+
+        for (const file of files) {
+          if (file.endsWith('.yjs')) {
+            const roomId = file.replace('.yjs', '')
+            try {
+              // This loads the room AND subscribes to its gossipsub topic
+              await getOrCreateRoom(roomId)
+              console.log(`[Startup] ✓ Loaded room ${roomId.slice(0, 6)}`)
+            } catch (err) {
+              console.warn(`[Startup] Failed to load room ${roomId.slice(0, 6)}:`, err.message)
+            }
+          }
+        }
+
+        console.log(`[Startup] Room loading complete, subscribed to ${rooms.size} topics`)
+      } catch (err) {
+        console.warn('[Startup] Failed to load persisted rooms:', err.message)
+      }
+    }, 2000) // Wait for libp2p to be ready
   }
 
   // ===== MIRROR HTTP API =====
@@ -501,8 +514,7 @@ async function main() {
     rooms.forEach((room, roomId) => {
       const files = room.manifest.get('files') || []
       const chatMsgs = room.chat.length
-      const streamCount = room.streams.size
-      console.log(`  - Room ${roomId.slice(0, 6)}: ${files.length} files, ${chatMsgs} chat msgs, ${streamCount} streams`)
+      console.log(`  - Room ${roomId.slice(0, 6)}: ${files.length} files, ${chatMsgs} chat msgs`)
     })
   }, 30000)
 }
