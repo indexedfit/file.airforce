@@ -60,6 +60,7 @@ import {
   getRooms,
 } from "./store.js";
 import { addFilesAndCreateManifest, formatBytes } from "./file-manager.js";
+import { MIRROR_URL } from "./constants.js";
 
 // Peer info helpers
 function listAddresses(libp2p) {
@@ -431,7 +432,6 @@ export async function startUI() {
           lastSeen: Date.now(),
         });
 
-      const existing = getRoom(roomId);
       await rooms.join(roomId, {
         onManifestUpdate: async (manifest) => {
           const room = getRoom(roomId);
@@ -475,6 +475,44 @@ export async function startUI() {
         try {
           for await (const _ of helia.pin.add(f.cid)) {}
         } catch {}
+      }
+
+      // Upload blocks to mirror
+      if (added.files.length > 0) {
+        try {
+          const blocks = [];
+
+          // Collect all blocks for each uploaded file
+          for (const file of added.files) {
+            const cids = [file.cid];
+            // Walk the DAG to get all child blocks
+            for await (const link of fs.ls(file.cid)) {
+              if (link.cid) cids.push(link.cid);
+            }
+
+            // Fetch block bytes
+            for (const cid of cids) {
+              try {
+                const bytes = await helia.blockstore.get(cid);
+                blocks.push({
+                  cid: cid.toString(),
+                  bytes: btoa(String.fromCharCode(...bytes))
+                });
+              } catch {}
+            }
+          }
+
+          if (blocks.length > 0) {
+            await fetch(MIRROR_URL, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ blocks })
+            });
+            console.log(`[Mirror] Uploaded ${blocks.length} blocks for ${added.files.length} files`);
+          }
+        } catch (err) {
+          console.warn('[Mirror] Upload failed:', err.message);
+        }
       }
 
       await renderRoomsIfActive();
