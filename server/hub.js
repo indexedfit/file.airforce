@@ -203,20 +203,11 @@ async function main() {
 
         console.log(`[Notify] Room ${roomId.slice(0, 6)} announced by ${remotePeer.slice(-16)}`)
 
-        // Load room (triggers gossipsub subscription - synchronous)
-        const room = await getOrCreateRoom(roomId)
+        // Load room (triggers gossipsub subscription)
+        // Browser will proactively send SNAPSHOT after notifying us
+        await getOrCreateRoom(roomId)
 
-        console.log(`[Notify] ✓ Subscribed to room ${roomId.slice(0, 6)}`)
-
-        // Request full state from the peer that just notified us
-        // Subscription is active now, publish immediately
-        const topic = ROOM_TOPIC(roomId)
-        await libp2p.services.pubsub.publish(topic, enc({
-          type: 'SNAPSHOT_REQUEST',
-          roomId
-        }))
-
-        console.log(`[Notify] Requested SNAPSHOT for room ${roomId.slice(0, 6)}`)
+        console.log(`[Notify] ✓ Subscribed to room ${roomId.slice(0, 6)} (waiting for SNAPSHOT)`)
       } catch (err) {
         console.warn(`[Notify] Failed to process notification:`, err.message)
       } finally {
