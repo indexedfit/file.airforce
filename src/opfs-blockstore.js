@@ -60,6 +60,19 @@ export async function createOPFSBlockstore(rootName = 'wc-blocks') {
       async open() {},
       async close() {},
       async put(cid, bytes) {
+        // Debug: Check for codec/encoding mismatch
+        const cidStr = cid.toString()
+        const isRawCodec = cidStr.startsWith('bafkrei')  // raw codec
+        const hasDagPbSig = bytes[0] === 0x0a  // dag-pb signature
+
+        if (isRawCodec && hasDagPbSig) {
+          console.warn(`[Blockstore] ⚠️  CODEC MISMATCH detected during PUT`)
+          console.warn(`[Blockstore] CID: ${cidStr.slice(0, 20)}... (raw codec 0x55)`)
+          console.warn(`[Blockstore] Block starts with 0x0a (dag-pb signature)`)
+          console.warn(`[Blockstore] First 10 bytes:`, Array.from(bytes.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' '))
+          console.trace('[Blockstore] Call stack:')
+        }
+
         const [a, b, name] = splitCid(cid)
         const dir = await ensurePath(blocks, [a, b])
         await writeFile(dir, `${name}.bin`, bytes)
@@ -107,6 +120,19 @@ export async function createOPFSBlockstore(rootName = 'wc-blocks') {
     async open() {},
     async close() { db.close() },
     async put(cid, bytes) {
+      // Debug: Check for codec/encoding mismatch
+      const cidStr = cid.toString()
+      const isRawCodec = cidStr.startsWith('bafkrei')  // raw codec
+      const hasDagPbSig = bytes[0] === 0x0a  // dag-pb signature
+
+      if (isRawCodec && hasDagPbSig) {
+        console.warn(`[Blockstore IDB] ⚠️  CODEC MISMATCH detected during PUT`)
+        console.warn(`[Blockstore IDB] CID: ${cidStr.slice(0, 20)}... (raw codec 0x55)`)
+        console.warn(`[Blockstore IDB] Block starts with 0x0a (dag-pb signature)`)
+        console.warn(`[Blockstore IDB] First 10 bytes:`, Array.from(bytes.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' '))
+        console.trace('[Blockstore IDB] Call stack:')
+      }
+
       await new Promise((res, rej) => {
         const req = tx('readwrite').put(bytes, cid.toString())
         req.onsuccess = () => res()

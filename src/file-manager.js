@@ -5,25 +5,67 @@
  */
 
 import { CID } from 'multiformats/cid'
-import { UnixFS } from 'ipfs-unixfs'
+import { decode as decodeDagPb } from '@ipld/dag-pb'
 
 /**
- * Detect and unwrap UnixFS protobuf encoding from raw blocks
- * Some blocks arrive from bitswap with UnixFS wrapping that fs.cat() doesn't strip
+ * Detect and unwrap dag-pb + UnixFS protobuf encoding from raw blocks
+ *
+ * BUG WORKAROUND: Some blocks arrive from bitswap with dag-pb wrapping even when
+ * the CID codec indicates raw (0x55). This appears to be a Helia bitswap bug on
+ * iOS Safari where remote blocks are re-encoded during transfer.
+ *
+ * Root cause: CID says "raw codec" but actual block bytes have dag-pb PBNode wrapper.
+ * fs.cat() trusts the CID codec and doesn't unwrap, causing corrupt data.
+ *
+ * This function detects dag-pb signature (0x0a) and manually unwraps the PBNode.Data field.
  */
-function unwrapUnixFS(bytes) {
+function unwrapDagPb(bytes) {
   try {
-    // Check if bytes start with UnixFS protobuf signature (0x0a = field 1, wire type 2)
+    // Check if bytes start with dag-pb signature (0x0a = field 1, wire type 2)
     if (bytes[0] === 0x0a) {
-      console.log('[unwrapUnixFS] Detected UnixFS wrapper, attempting to unwrap...')
-      const unixfs = UnixFS.unmarshal(bytes)
-      if (unixfs.data) {
-        console.log(`[unwrapUnixFS] ✓ Unwrapped ${bytes.length} -> ${unixfs.data.length} bytes`)
-        return unixfs.data
+      console.log('[unwrapDagPb] ⚠️  Detected dag-pb wrapper on block with raw CID codec!')
+      console.log('[unwrapDagPb] This is a Helia bitswap bug - CID codec says raw but block is wrapped')
+
+      // Decode the dag-pb PBNode
+      const node = decodeDagPb(bytes)
+
+      // The actual file data is in node.Data
+      if (node.Data) {
+        console.log(`[unwrapDagPb] ✓ Unwrapped ${bytes.length} -> ${node.Data.length} bytes`)
+
+        // Log first few bytes of unwrapped data
+        const hex = Array.from(node.Data.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ')
+        console.log(`[unwrapDagPb] Unwrapped data starts with: ${hex}`)
+
+        // Validate it's actual file data (common file signatures)
+        const first = node.Data[0]
+        const second = node.Data[1]
+        const third = node.Data[2]
+
+        // JPEG: ff d8 ff
+        // PNG: 89 50 4e 47
+        // GIF: 47 49 46 38
+        // WebP: 52 49 46 46 (RIFF)
+        const isValidFileData = (
+          (first === 0xff && second === 0xd8 && third === 0xff) || // JPEG
+          (first === 0x89 && second === 0x50 && third === 0x4e && node.Data[3] === 0x47) || // PNG
+          (first === 0x47 && second === 0x49 && third === 0x46) || // GIF
+          (first === 0x52 && second === 0x49 && third === 0x46 && node.Data[3] === 0x46) // WebP/RIFF
+        )
+
+        if (isValidFileData) {
+          console.log('[unwrapDagPb] ✓ Valid file signature detected in unwrapped data')
+          return node.Data
+        } else {
+          console.warn(`[unwrapDagPb] Unwrapped data doesn't have known file signature, keeping original`)
+          console.warn(`[unwrapDagPb] First 3 bytes: 0x${first.toString(16)} 0x${second.toString(16)} 0x${third.toString(16)}`)
+        }
+      } else {
+        console.warn('[unwrapDagPb] PBNode has no Data field')
       }
     }
   } catch (err) {
-    console.warn('[unwrapUnixFS] Failed to unwrap, using original bytes:', err.message)
+    console.warn('[unwrapDagPb] Failed to unwrap, using original bytes:', err.message)
   }
   return bytes
 }
@@ -62,6 +104,7 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
     try {
       cid = CID.parse(cid);
       console.log(`[fetchFileAsBlob] ✓ CID parsed:`, cid.toString());
+      console.log(`[fetchFileAsBlob] CID codec: ${cid.code} (0x${cid.code.toString(16)}) - raw=0x55, dag-pb=0x70`);
     } catch (err) {
       console.error(`[fetchFileAsBlob] Failed to parse CID:`, err);
       throw new Error(`Invalid CID: ${cid}`);
@@ -80,9 +123,9 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
       // iOS Safari fix: Ensure chunks are standard Uint8Arrays, not subclasses
       let standardChunk = chunk instanceof Uint8Array ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength) : chunk;
 
-      // Critical fix: Unwrap UnixFS protobuf encoding if present
-      // Bitswap blocks sometimes arrive with UnixFS wrapping that fs.cat() doesn't strip
-      standardChunk = unwrapUnixFS(standardChunk);
+      // Critical fix: Unwrap dag-pb encoding if present
+      // Bitswap blocks sometimes arrive with dag-pb wrapping that fs.cat() doesn't strip
+      standardChunk = unwrapDagPb(standardChunk);
 
       parts.push(standardChunk);
       loaded += standardChunk.length || standardChunk.byteLength || 0;
