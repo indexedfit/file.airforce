@@ -2,7 +2,6 @@
 /**
  * In-app file viewer modal
  * Handles images, video, audio, text with native HTML5 elements
- * Safari iOS compatible (uses data URLs instead of blob URLs)
  */
 
 import { guessMime } from './file-manager.js'
@@ -10,40 +9,17 @@ import { guessMime } from './file-manager.js'
 let modal = null
 
 /**
- * Detect Safari/iOS for blob URL workarounds
- */
-function isSafariOrIOS() {
-  const ua = navigator.userAgent
-  return /iPad|iPhone|iPod/.test(ua) || /^((?!chrome|android).)*safari/i.test(ua)
-}
-
-/**
- * Convert blob to data URL (for Safari compatibility)
- */
-async function blobToDataURL(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onloadend = () => resolve(reader.result)
-    reader.onerror = reject
-    reader.readAsDataURL(blob)
-  })
-}
-
-/**
  * Create viewer content based on file type
  */
 async function createViewer(blob, name, mimeType) {
-  const useSafari = isSafariOrIOS()
-
-  // Convert to data URL for Safari, otherwise use blob URL
-  const url = useSafari ? await blobToDataURL(blob) : URL.createObjectURL(blob)
+  const url = URL.createObjectURL(blob)
 
   if (mimeType.startsWith('image/')) {
     const img = document.createElement('img')
     img.src = url
     img.className = 'max-w-full max-h-full object-contain'
     img.alt = name
-    return { element: img, cleanup: () => !useSafari && URL.revokeObjectURL(url) }
+    return { element: img, cleanup: () => URL.revokeObjectURL(url) }
   }
 
   if (mimeType.startsWith('video/')) {
@@ -52,7 +28,7 @@ async function createViewer(blob, name, mimeType) {
     video.controls = true
     video.playsInline = true // Prevents fullscreen on iOS
     video.className = 'max-w-full max-h-full'
-    return { element: video, cleanup: () => !useSafari && URL.revokeObjectURL(url) }
+    return { element: video, cleanup: () => URL.revokeObjectURL(url) }
   }
 
   if (mimeType.startsWith('audio/')) {
@@ -73,7 +49,7 @@ async function createViewer(blob, name, mimeType) {
     audio.className = 'w-full max-w-md'
 
     container.append(icon, fileName, audio)
-    return { element: container, cleanup: () => !useSafari && URL.revokeObjectURL(url) }
+    return { element: container, cleanup: () => URL.revokeObjectURL(url) }
   }
 
   if (mimeType.startsWith('text/')) {
