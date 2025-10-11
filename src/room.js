@@ -325,45 +325,86 @@ export class RoomUI {
 
     const filesUl = document.getElementById("room-files");
     if (filesUl) {
-      filesUl.onclick = async (e) => {
-        const target = e.target.closest("button[data-action]");
-        if (!target) {
-          const li = e.target.closest("li[data-idx]");
-          if (!li) return;
-          filesUl.querySelectorAll("li").forEach((n) => n.classList.remove("is-selected"));
-          li.classList.add("is-selected");
-          return;
-        }
-        const action = target.dataset.action;
-        const cid = target.dataset.cid;
-        const name = target.dataset.name || "file";
-        if (!cid) return;
+      // Helper to open file with navigation
+      const openFileWithNav = async (idx) => {
+        const manifest = await this.rooms.getManifest(roomId);
+        const files = manifest?.files || [];
+        if (idx < 0 || idx >= files.length) return;
+
+        const file = files[idx];
+        this.onProgress(true, 0, 0, "Opening…");
         try {
-          const label = action === "open-file" ? "Opening…" : "Downloading…";
-          this.onProgress(true, 0, 0, label);
-          const blob = await fetchFileAsBlob(this.fs, cid, name, (loaded, total) => {
+          const blob = await fetchFileAsBlob(this.fs, file.cid, file.name, (loaded, total) => {
             this.onProgress(true, loaded, total, `${loaded} bytes`);
           });
-          if (action === "open-file") openFile(blob, name);
-          else if (action === "download-file") downloadFile(blob, name);
+
+          // Import and call showFileViewer with navigation
+          const { showFileViewer } = await import('./file-viewer.js');
+          await showFileViewer(blob, file.name, {
+            currentIndex: idx,
+            totalFiles: files.length,
+            onNext: () => {
+              if (idx < files.length - 1) openFileWithNav(idx + 1);
+            },
+            onPrev: () => {
+              if (idx > 0) openFileWithNav(idx - 1);
+            }
+          });
         } catch (err) {
           console.error(err);
         } finally {
           this.onProgress(false);
         }
       };
-      filesUl.ondblclick = () => {
-        const li = filesUl.querySelector("li.is-selected") || filesUl.querySelector('li[data-idx="0"]');
-        if (!li) return;
-        const btn = li.querySelector('button[data-action="open-file"]');
-        btn?.click();
+
+      filesUl.onclick = async (e) => {
+        const target = e.target.closest("button[data-action]");
+
+        // Handle download button
+        if (target?.dataset.action === "download-file") {
+          const cid = target.dataset.cid;
+          const name = target.dataset.name || "file";
+          if (!cid) return;
+          try {
+            this.onProgress(true, 0, 0, "Downloading…");
+            const blob = await fetchFileAsBlob(this.fs, cid, name, (loaded, total) => {
+              this.onProgress(true, loaded, total, `${loaded} bytes`);
+            });
+            downloadFile(blob, name);
+          } catch (err) {
+            console.error(err);
+          } finally {
+            this.onProgress(false);
+          }
+          return;
+        }
+
+        // Single-click on list item or "Open" button opens file with navigation
+        const clickedItem = e.target.closest("[data-idx]");
+        const openButton = target?.dataset.action === "open-file";
+
+        if (clickedItem || openButton) {
+          const item = clickedItem || target.closest("[data-idx]");
+          if (!item) return;
+
+          const idx = parseInt(item.dataset.idx, 10);
+          if (isNaN(idx)) return;
+
+          // Update selection
+          filesUl.querySelectorAll("[data-idx]").forEach((n) => n.classList.remove("is-selected"));
+          item.classList.add("is-selected");
+
+          // Open file with navigation
+          await openFileWithNav(idx);
+        }
       };
+
       filesUl.onkeydown = (e) => {
         const tag = (e.target?.tagName || "").toLowerCase();
         if (tag === "input" || tag === "textarea") return;
         if (!["ArrowDown", "ArrowUp", "Enter"].includes(e.key)) return;
         e.preventDefault();
-        const items = Array.from(filesUl.querySelectorAll("li[data-idx]"));
+        const items = Array.from(filesUl.querySelectorAll("[data-idx]"));
         if (!items.length) return;
         let idx = items.findIndex((n) => n.classList.contains("is-selected"));
         if (idx < 0) idx = 0;
@@ -374,12 +415,14 @@ export class RoomUI {
         sel.classList.add("is-selected");
         sel.focus();
         if (e.key === "Enter") {
-          const btn = sel.querySelector('button[data-action="open-file"]');
-          btn?.click();
+          const fileIdx = parseInt(sel.dataset.idx, 10);
+          if (!isNaN(fileIdx)) {
+            openFileWithNav(fileIdx);
+          }
         }
       };
       queueMicrotask(() => {
-        const first = filesUl.querySelector('li[data-idx="0"]');
+        const first = filesUl.querySelector('[data-idx="0"]');
         if (first) first.classList.add("is-selected");
       });
     }
@@ -403,26 +446,7 @@ export class RoomUI {
       };
     }
 
-    const copyBtn = document.getElementById("btn-copy-room-link");
     const shareBtn = document.getElementById("btn-share-room");
-    if (copyBtn) {
-      copyBtn.onclick = () => {
-        try {
-          const link = this.buildInviteURL(roomId);
-          this.showRoomQR(link);
-          navigator.clipboard.writeText(link).then(() => {
-            const toast = document.getElementById("toast");
-            if (toast) {
-              toast.textContent = "Link copied";
-              toast.hidden = false;
-              setTimeout(() => (toast.hidden = true), 2000);
-            }
-          });
-        } catch (e) {
-          console.error(e);
-        }
-      };
-    }
     if (shareBtn) {
       shareBtn.onclick = () => {
         try {

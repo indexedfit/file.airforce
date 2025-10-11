@@ -224,7 +224,6 @@ export function renderRoomDetails(room, opts = {}) {
           <button id="btn-view-list" class="px-2 py-1 border rounded text-xs ${viewMode === 'list' ? 'bg-gray-200' : ''}">List</button>
           <button id="btn-view-grid" class="px-2 py-1 border rounded text-xs ${viewMode === 'grid' ? 'bg-gray-200' : ''}">Grid</button>
           <button id="btn-share-room" class="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">Share</button>
-          <button id="btn-copy-room-link" class="px-2 py-1 border rounded text-xs">Copy</button>
         </div>
       </div>
     </div>

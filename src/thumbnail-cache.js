@@ -10,7 +10,7 @@
 const DB_NAME = 'file-airforce-thumbnails'
 const STORE_NAME = 'thumbnails'
 const DB_VERSION = 1
-const THUMB_SIZE = 200 // Square thumbnail size
+const THUMB_SIZE = 300 // Square thumbnail size
 
 /**
  * @typedef {Object} ThumbnailCache
@@ -69,7 +69,7 @@ async function generateImageThumbnail(blob) {
         canvas.height = height
         ctx.drawImage(img, 0, 0, width, height)
 
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.7)
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
         URL.revokeObjectURL(url)
         resolve(dataUrl)
       } catch (err) {
@@ -125,7 +125,7 @@ async function generateVideoThumbnail(blob) {
         canvas.height = height
         ctx.drawImage(video, 0, 0, width, height)
 
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.7)
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
         URL.revokeObjectURL(url)
         resolve(dataUrl)
       } catch (err) {

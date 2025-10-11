@@ -107,9 +107,17 @@ async function createViewer(blob, name, mimeType) {
 }
 
 /**
- * Show file in modal viewer
+ * Show file in modal viewer with navigation support
+ * @param {Blob} blob - File blob to display
+ * @param {string} name - File name
+ * @param {Object} options - Navigation options
+ * @param {Function} options.onNext - Callback for next file
+ * @param {Function} options.onPrev - Callback for previous file
+ * @param {number} options.currentIndex - Current file index
+ * @param {number} options.totalFiles - Total number of files
  */
-export async function showFileViewer(blob, name) {
+export async function showFileViewer(blob, name, options = {}) {
+  const { onNext, onPrev, currentIndex, totalFiles } = options
   const mimeType = guessMime(name)
 
   // Create modal if it doesn't exist
@@ -131,21 +139,49 @@ export async function showFileViewer(blob, name) {
   closeBtn.innerHTML = '&times;'
   closeBtn.setAttribute('aria-label', 'Close')
 
+  // Navigation buttons
+  const showNav = onNext && onPrev && totalFiles > 1
+  let prevBtn, nextBtn, counter
+
+  if (showNav) {
+    prevBtn = document.createElement('button')
+    prevBtn.className = 'absolute left-4 top-1/2 -translate-y-1/2 text-white text-4xl w-12 h-12 flex items-center justify-center hover:bg-white/20 rounded z-10'
+    prevBtn.innerHTML = '‹'
+    prevBtn.setAttribute('aria-label', 'Previous file')
+    prevBtn.onclick = onPrev
+
+    nextBtn = document.createElement('button')
+    nextBtn.className = 'absolute right-4 top-1/2 -translate-y-1/2 text-white text-4xl w-12 h-12 flex items-center justify-center hover:bg-white/20 rounded z-10'
+    nextBtn.innerHTML = '›'
+    nextBtn.setAttribute('aria-label', 'Next file')
+    nextBtn.onclick = onNext
+
+    counter = document.createElement('div')
+    counter.className = 'absolute bottom-4 left-1/2 -translate-x-1/2 text-white text-sm bg-black/50 px-3 py-1 rounded'
+    counter.textContent = `${currentIndex + 1} / ${totalFiles}`
+  }
+
   // Content container
   const content = document.createElement('div')
-  content.className = 'relative max-w-full max-h-full flex items-center justify-center'
+  content.className = 'relative w-full h-full flex items-center justify-center'
 
   // Create viewer
   const { element, cleanup } = await createViewer(blob, name, mimeType)
   content.appendChild(element)
 
   modal.appendChild(closeBtn)
+  if (showNav) {
+    modal.appendChild(prevBtn)
+    modal.appendChild(nextBtn)
+    modal.appendChild(counter)
+  }
   modal.appendChild(content)
 
   // Close handlers
   const close = () => {
     modal.style.display = 'none'
     cleanup()
+    document.removeEventListener('keydown', onKeyDown)
   }
 
   closeBtn.onclick = close
@@ -153,12 +189,41 @@ export async function showFileViewer(blob, name) {
     if (e.target === modal) close()
   }
 
-  // Escape key
-  const onEscape = (e) => {
+  // Keyboard navigation
+  const onKeyDown = (e) => {
     if (e.key === 'Escape') {
       close()
-      document.removeEventListener('keydown', onEscape)
+    } else if (e.key === 'ArrowLeft' && onPrev) {
+      onPrev()
+    } else if (e.key === 'ArrowRight' && onNext) {
+      onNext()
     }
   }
-  document.addEventListener('keydown', onEscape)
+  document.addEventListener('keydown', onKeyDown)
+
+  // Touch swipe navigation
+  if (showNav) {
+    let touchStartX = 0
+    let touchEndX = 0
+
+    content.addEventListener('touchstart', (e) => {
+      touchStartX = e.changedTouches[0].screenX
+    }, { passive: true })
+
+    content.addEventListener('touchend', (e) => {
+      touchEndX = e.changedTouches[0].screenX
+      const diff = touchStartX - touchEndX
+      const threshold = 50 // Minimum swipe distance
+
+      if (Math.abs(diff) > threshold) {
+        if (diff > 0 && onNext) {
+          // Swipe left - next file
+          onNext()
+        } else if (diff < 0 && onPrev) {
+          // Swipe right - previous file
+          onPrev()
+        }
+      }
+    }, { passive: true })
+  }
 }
