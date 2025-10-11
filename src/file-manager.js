@@ -28,15 +28,24 @@ export function guessMime(name = "") {
 }
 
 export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
+  console.log(`[fetchFileAsBlob] Starting fetch for ${name} (${cid})`);
   let total = 0;
   const parts = [];
   let loaded = 0;
-  for await (const chunk of fs.cat(cid)) {
-    parts.push(chunk);
-    loaded += chunk.length || chunk.byteLength || 0;
-    onProgress(loaded, total);
+  try {
+    for await (const chunk of fs.cat(cid)) {
+      parts.push(chunk);
+      loaded += chunk.length || chunk.byteLength || 0;
+      onProgress(loaded, total);
+    }
+    console.log(`[fetchFileAsBlob] ✓ Fetched ${parts.length} chunks, ${loaded} bytes total`);
+    const blob = new Blob(parts, { type: guessMime(name) });
+    console.log(`[fetchFileAsBlob] ✓ Created blob: ${blob.size} bytes, type: ${blob.type}`);
+    return blob;
+  } catch (err) {
+    console.error(`[fetchFileAsBlob] ✗ Failed to fetch ${name}:`, err);
+    throw new Error(`Failed to fetch file: ${err.message || 'Unknown error'}`);
   }
-  return new Blob(parts, { type: guessMime(name) });
 }
 
 export async function addFilesAndCreateManifest(fs, files, onProgress = () => {}) {
