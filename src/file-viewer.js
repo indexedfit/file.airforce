@@ -11,6 +11,7 @@ let modal = null
 
 /**
  * Detect Safari/iOS for blob URL workarounds
+ * Must match thumbnail-cache.js detection exactly
  */
 function isSafariOrIOS() {
   const ua = navigator.userAgent
@@ -19,6 +20,7 @@ function isSafariOrIOS() {
 
 /**
  * Convert blob to data URL (for Safari compatibility)
+ * Safari iOS can't reliably display blob URLs in img/video/audio tags
  */
 async function blobToDataURL(blob) {
   return new Promise((resolve, reject) => {
@@ -33,17 +35,62 @@ async function blobToDataURL(blob) {
  * Create viewer content based on file type
  */
 async function createViewer(blob, name, mimeType) {
-  const useSafari = isSafariOrIOS()
+  // iOS Safari fix: Always ensure blob has correct MIME type
+  // Safari is strict about MIME types and can drop them during blob operations
+  console.log(`[FileViewer] Creating viewer for ${name}: blob.type="${blob.type}", expected="${mimeType}", size=${blob.size}`)
 
-  // Convert to data URL for Safari, otherwise use blob URL
-  const url = useSafari ? await blobToDataURL(blob) : URL.createObjectURL(blob)
+  if (blob.type !== mimeType) {
+    console.log(`[FileViewer] MIME type mismatch - recreating blob with correct type`)
+    blob = new Blob([blob], { type: mimeType })
+    console.log(`[FileViewer] After recreate: blob.type="${blob.type}", size=${blob.size}`)
+  }
+
+  // Debug: Check if blob bytes are valid
+  console.log(`[FileViewer] Testing blob data integrity...`);
+  const testBytes = await blob.arrayBuffer();
+  console.log(`[FileViewer] Blob arrayBuffer size: ${testBytes.byteLength}`);
+  const firstBytes = new Uint8Array(testBytes, 0, Math.min(20, testBytes.byteLength));
+  console.log(`[FileViewer] First 20 bytes:`, Array.from(firstBytes).map(b => b.toString(16).padStart(2, '0')).join(' '));
+
+  // PNG should start with: 89 50 4e 47 0d 0a 1a 0a
+  // JPEG should start with: ff d8 ff
+  const isPNG = firstBytes[0] === 0x89 && firstBytes[1] === 0x50 && firstBytes[2] === 0x4e && firstBytes[3] === 0x47;
+  const isJPEG = firstBytes[0] === 0xff && firstBytes[1] === 0xd8 && firstBytes[2] === 0xff;
+  console.log(`[FileViewer] Valid PNG header: ${isPNG}, Valid JPEG header: ${isJPEG}`);
+
+  // Use blob URLs for all browsers
+  const url = URL.createObjectURL(blob)
+  console.log(`[FileViewer] Created URL: ${url.substring(0, 50)}...`)
 
   if (mimeType.startsWith('image/')) {
+    console.log(`[FileViewer] Creating image element...`);
     const img = document.createElement('img')
+
+    // Add error handler BEFORE setting src
+    img.onerror = (e) => {
+      console.error(`[FileViewer] ✗✗✗ IMAGE FAILED TO LOAD ✗✗✗`);
+      console.error(`[FileViewer] Error event:`, e);
+      console.error(`[FileViewer] Image src:`, img.src);
+      console.error(`[FileViewer] Blob type:`, blob.type);
+      console.error(`[FileViewer] Blob size:`, blob.size);
+      console.error(`[FileViewer] Expected MIME:`, mimeType);
+      console.error(`[FileViewer] URL:`, url);
+    }
+    img.onload = () => {
+      console.log(`[FileViewer] ✓✓✓ IMAGE LOADED SUCCESSFULLY ✓✓✓`);
+      console.log(`[FileViewer] Image:`, {
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+        src: img.src.substring(0, 100) + '...'
+      });
+    }
+
     img.src = url
     img.className = 'max-w-full max-h-full object-contain'
     img.alt = name
-    return { element: img, cleanup: () => !useSafari && URL.revokeObjectURL(url) }
+    console.log(`[FileViewer] Image src set to: ${url.substring(0, 100)}...`);
+
+    return { element: img, cleanup: () => URL.revokeObjectURL(url) }
   }
 
   if (mimeType.startsWith('video/')) {
@@ -52,7 +99,7 @@ async function createViewer(blob, name, mimeType) {
     video.controls = true
     video.playsInline = true // Prevents fullscreen on iOS
     video.className = 'max-w-full max-h-full'
-    return { element: video, cleanup: () => !useSafari && URL.revokeObjectURL(url) }
+    return { element: video, cleanup: () => URL.revokeObjectURL(url) }
   }
 
   if (mimeType.startsWith('audio/')) {
@@ -73,7 +120,7 @@ async function createViewer(blob, name, mimeType) {
     audio.className = 'w-full max-w-md'
 
     container.append(icon, fileName, audio)
-    return { element: container, cleanup: () => !useSafari && URL.revokeObjectURL(url) }
+    return { element: container, cleanup: () => URL.revokeObjectURL(url) }
   }
 
   if (mimeType.startsWith('text/')) {
@@ -117,8 +164,17 @@ async function createViewer(blob, name, mimeType) {
  * @param {number} options.totalFiles - Total number of files
  */
 export async function showFileViewer(blob, name, options = {}) {
+  console.log(`[showFileViewer] ========== SHOW FILE VIEWER ==========`);
+  console.log(`[showFileViewer] Input blob:`, {
+    name: name,
+    size: blob.size,
+    type: blob.type,
+    constructor: blob.constructor.name
+  });
+
   const { onNext, onPrev, currentIndex, totalFiles } = options
   const mimeType = guessMime(name)
+  console.log(`[showFileViewer] Guessed MIME type: "${mimeType}"`);
 
   // Create modal if it doesn't exist
   if (!modal) {

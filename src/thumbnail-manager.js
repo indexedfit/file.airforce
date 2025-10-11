@@ -30,19 +30,7 @@ export async function createThumbnailManager(fs) {
   let pollTimer = null
 
   /**
-   * Check if blocks are available in blockstore
-   */
-  async function isAvailable(cid) {
-    try {
-      await fs.stat(cid)
-      return true
-    } catch {
-      return false
-    }
-  }
-
-  /**
-   * Generate thumbnail for a CID
+   * Generate thumbnail for a CID (triggers bitswap fetch)
    */
   async function generateThumbnail(cid, name, roomId) {
     try {
@@ -53,11 +41,13 @@ export async function createThumbnailManager(fs) {
         return true
       }
 
-      // Fetch blocks and generate
+      console.log(`[Thumbnail] Fetching blocks for ${name} via bitswap...`)
+      // Fetch blocks and generate (this triggers bitswap if not local)
       const chunks = []
       for await (const chunk of fs.cat(cid)) {
         chunks.push(chunk)
       }
+      console.log(`[Thumbnail] ✓ Got ${chunks.length} chunks for ${name}`)
       const blob = new Blob(chunks, { type: guessMimeType(name) })
 
       const thumbUrl = await cache.generate(blob, guessMimeType(name))
@@ -74,29 +64,21 @@ export async function createThumbnailManager(fs) {
   }
 
   /**
-   * Poll pending thumbnails and generate when blocks available
+   * Process pending thumbnails (attempts generation which triggers bitswap)
    */
   async function poll() {
     const toRemove = []
 
     for (const [cid, info] of pending.entries()) {
-      // Check if blocks available
-      if (await isAvailable(cid)) {
-        const success = await generateThumbnail(cid, info.name, info.roomId)
-        if (success) toRemove.push(cid)
-        else {
-          // Failed to generate, retry
-          info.retries++
-          if (info.retries >= MAX_RETRIES) {
-            console.warn(`Giving up on thumbnail for ${info.name} after ${MAX_RETRIES} retries`)
-            toRemove.push(cid)
-          }
-        }
+      // Attempt to generate (this will trigger bitswap fetch)
+      const success = await generateThumbnail(cid, info.name, info.roomId)
+      if (success) {
+        toRemove.push(cid)
       } else {
-        // Blocks not ready yet, increment retry count
+        // Failed to generate, retry
         info.retries++
         if (info.retries >= MAX_RETRIES) {
-          console.warn(`Blocks never arrived for ${info.name}, giving up`)
+          console.warn(`Giving up on thumbnail for ${info.name} after ${MAX_RETRIES} retries`)
           toRemove.push(cid)
         }
       }

@@ -3,7 +3,7 @@ import { createYDoc, updateManifest, addChatMsg, getChatMessages } from './ydoc.
 import { ROOM_TOPIC } from './constants.js'
 import { renderRoomDetails, renderChatMessages } from './ui.js'
 import { getRoom } from './store.js'
-import { fetchFileAsBlob, openFile, downloadFile } from './file-manager.js'
+import { fetchFileAsBlob, fetchFileAsBlobWithRetry, openFile, downloadFile } from './file-manager.js'
 import { onThumbnailReady } from './thumbnail-events.js'
 
 /**
@@ -332,14 +332,31 @@ export class RoomUI {
         if (idx < 0 || idx >= files.length) return;
 
         const file = files[idx];
+        console.log(`[Room] ========== OPENING FILE ==========`);
+        console.log(`[Room] File index: ${idx}`);
+        console.log(`[Room] File details:`, {
+          name: file.name,
+          cid: file.cid,
+          size: file.size
+        });
+
         this.onProgress(true, 0, 0, "Opening…");
         try {
-          const blob = await fetchFileAsBlob(this.fs, file.cid, file.name, (loaded, total) => {
+          // Use retry for opening - needed for bitswap sync (protobuf errors)
+          const blob = await fetchFileAsBlobWithRetry(this.fs, file.cid, file.name, (loaded, total) => {
             this.onProgress(true, loaded, total, `${loaded} bytes`);
+          });
+
+          console.log(`[Room] ✓ Blob fetched successfully`);
+          console.log(`[Room] Blob before viewer:`, {
+            size: blob.size,
+            type: blob.type,
+            constructor: blob.constructor.name
           });
 
           // Import and call showFileViewer with navigation
           const { showFileViewer } = await import('./file-viewer.js');
+          console.log(`[Room] Calling showFileViewer...`);
           await showFileViewer(blob, file.name, {
             currentIndex: idx,
             totalFiles: files.length,
@@ -351,7 +368,13 @@ export class RoomUI {
             }
           });
         } catch (err) {
-          console.error(err);
+          console.error(`Failed to open ${file.name}:`, err);
+          const toast = document.getElementById("toast");
+          if (toast) {
+            toast.textContent = `Failed to open file: ${err.message || 'Unknown error'}`;
+            toast.hidden = false;
+            setTimeout(() => (toast.hidden = true), 3000);
+          }
         } finally {
           this.onProgress(false);
         }
@@ -367,7 +390,7 @@ export class RoomUI {
           if (!cid) return;
           try {
             this.onProgress(true, 0, 0, "Downloading…");
-            const blob = await fetchFileAsBlob(this.fs, cid, name, (loaded, total) => {
+            const blob = await fetchFileAsBlobWithRetry(this.fs, cid, name, (loaded, total) => {
               this.onProgress(true, loaded, total, `${loaded} bytes`);
             });
             downloadFile(blob, name);
