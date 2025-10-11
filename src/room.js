@@ -332,18 +332,14 @@ export class RoomUI {
         if (idx < 0 || idx >= files.length) return;
 
         const file = files[idx];
-        console.log(`[OpenFile] Opening file ${idx}: ${file.name} (${file.cid})`);
         this.onProgress(true, 0, 0, "Opening…");
         try {
-          console.log(`[OpenFile] Fetching blob for ${file.name}...`);
           const blob = await fetchFileAsBlob(this.fs, file.cid, file.name, (loaded, total) => {
             this.onProgress(true, loaded, total, `${loaded} bytes`);
           });
-          console.log(`[OpenFile] ✓ Got blob: ${blob.size} bytes, type: ${blob.type}`);
 
           // Import and call showFileViewer with navigation
           const { showFileViewer } = await import('./file-viewer.js');
-          console.log(`[OpenFile] Opening viewer for ${file.name}`);
           await showFileViewer(blob, file.name, {
             currentIndex: idx,
             totalFiles: files.length,
@@ -354,9 +350,8 @@ export class RoomUI {
               if (idx > 0) openFileWithNav(idx - 1);
             }
           });
-          console.log(`[OpenFile] ✓ Viewer opened`);
         } catch (err) {
-          console.error(`[OpenFile] ✗ Failed to open ${file.name}:`, err);
+          console.error(`Failed to open ${file.name}:`, err);
           const toast = document.getElementById("toast");
           if (toast) {
             toast.textContent = `Failed to open file: ${err.message || 'Unknown error'}`;
