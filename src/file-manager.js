@@ -54,7 +54,9 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
     console.log(`[fetchFileAsBlob] Calling fs.cat() with CID object...`);
     for await (const chunk of fs.cat(cid)) {
       console.log(`[fetchFileAsBlob] Got chunk: type=${chunk.constructor.name}, length=${chunk.length || chunk.byteLength || 0}`);
-      parts.push(chunk);
+      // iOS Safari fix: Ensure chunks are standard Uint8Arrays, not subclasses
+      const standardChunk = chunk instanceof Uint8Array ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength) : chunk;
+      parts.push(standardChunk);
       loaded += chunk.length || chunk.byteLength || 0;
       onProgress(loaded, total);
     }
@@ -64,15 +66,23 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
     const mimeType = guessMime(name);
     console.log(`[fetchFileAsBlob] MIME type from name: "${mimeType}"`);
 
+    // iOS Safari: Create blob with explicit type
     const blob = new Blob(parts, { type: mimeType });
     console.log(`[fetchFileAsBlob] ✓ Blob created: size=${blob.size}, type="${blob.type}", chunks=${parts.length}`);
+
+    // Verify blob is valid
+    if (blob.size === 0 && loaded > 0) {
+      console.error(`[fetchFileAsBlob] ✗ Blob size is 0 but we loaded ${loaded} bytes! Blob creation failed`);
+    }
+
     console.log(`[fetchFileAsBlob] Blob details:`, {
       size: blob.size,
       type: blob.type,
       name: name,
       cid: cid,
       expectedType: mimeType,
-      matchesExpected: blob.type === mimeType
+      matchesExpected: blob.type === mimeType,
+      sizeMatchesLoaded: blob.size === loaded
     });
 
     return blob;

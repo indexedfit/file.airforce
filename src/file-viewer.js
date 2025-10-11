@@ -45,8 +45,20 @@ async function createViewer(blob, name, mimeType) {
     console.log(`[FileViewer] After recreate: blob.type="${blob.type}", size=${blob.size}`)
   }
 
-  // Use blob URLs for all browsers (faster, no size limit)
-  // Safari iOS CAN handle blob URLs if the MIME type is correct
+  // Debug: Check if blob bytes are valid
+  console.log(`[FileViewer] Testing blob data integrity...`);
+  const testBytes = await blob.arrayBuffer();
+  console.log(`[FileViewer] Blob arrayBuffer size: ${testBytes.byteLength}`);
+  const firstBytes = new Uint8Array(testBytes, 0, Math.min(20, testBytes.byteLength));
+  console.log(`[FileViewer] First 20 bytes:`, Array.from(firstBytes).map(b => b.toString(16).padStart(2, '0')).join(' '));
+
+  // PNG should start with: 89 50 4e 47 0d 0a 1a 0a
+  // JPEG should start with: ff d8 ff
+  const isPNG = firstBytes[0] === 0x89 && firstBytes[1] === 0x50 && firstBytes[2] === 0x4e && firstBytes[3] === 0x47;
+  const isJPEG = firstBytes[0] === 0xff && firstBytes[1] === 0xd8 && firstBytes[2] === 0xff;
+  console.log(`[FileViewer] Valid PNG header: ${isPNG}, Valid JPEG header: ${isJPEG}`);
+
+  // Use blob URLs for all browsers
   const url = URL.createObjectURL(blob)
   console.log(`[FileViewer] Created URL: ${url.substring(0, 50)}...`)
 
