@@ -42,9 +42,11 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
 /**
  * Fetch file with retry logic for iOS Safari protobuf errors
  * iOS Safari sometimes fails on first attempt but succeeds on retry
+ * Uses same timing as thumbnail manager (500ms delay, 60 retries = 30s total)
  */
-export async function fetchFileAsBlobWithRetry(fs, cid, name, onProgress = () => {}, maxRetries = 10) {
+export async function fetchFileAsBlobWithRetry(fs, cid, name, onProgress = () => {}, maxRetries = 60) {
   let lastError = null;
+  const RETRY_DELAY = 500; // Match thumbnail manager's POLL_INTERVAL
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -54,9 +56,8 @@ export async function fetchFileAsBlobWithRetry(fs, cid, name, onProgress = () =>
       const isProtobufError = err.message?.includes('protobuf') || err.message?.includes('wireType');
 
       if (isProtobufError && attempt < maxRetries - 1) {
-        // Wait briefly before retry (exponential backoff)
-        const delay = Math.min(100 * Math.pow(1.5, attempt), 1000);
-        await new Promise(resolve => setTimeout(resolve, delay));
+        // Wait 500ms before retry (same as thumbnail manager)
+        await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
         console.log(`[fetchFile] Retry ${attempt + 1}/${maxRetries} for ${name}...`);
         continue;
       }
