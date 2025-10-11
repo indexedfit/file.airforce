@@ -178,8 +178,8 @@ function renderFilesGrid(files, thumbnails) {
     .join("")}</div>`;
 }
 
-export function renderRoomsList(rooms, onOpen) {
-  const ul = $("rooms-list");
+export function renderRoomsList(rooms, onOpen, targetId = 'rooms-list') {
+  const ul = $(targetId);
   if (!ul) return;
   const frag = document.createDocumentFragment();
   rooms.forEach((r) => {

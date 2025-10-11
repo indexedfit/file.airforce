@@ -114,8 +114,8 @@ export default function App() {
           </div>
 
           <div className="mt-6 bg-white border rounded p-4">
-            <h3 className="font-semibold">Recent drops</h3>
-            <ul id="drops-list" className="mt-2 divide-y"></ul>
+            <h3 className="font-semibold">Recent rooms</h3>
+            <ul id="home-rooms-list" className="mt-2 divide-y"></ul>
           </div>
         </section>
 

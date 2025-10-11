@@ -391,12 +391,11 @@ export async function startUI() {
       // Join as host
       await rooms.join(room.id, { manifest });
 
-      renderDrops(getDrops().slice(0, 5), "drops-list");
-
       // Navigate to room
       goto("rooms", { room: room.id });
 
       await renderRoomsIfActive();
+      renderHomeRooms(); // Update homepage list
       toast("Room created and files pinned locally");
     } catch (err) {
       console.error("autoCreate failed", err);
@@ -406,7 +405,17 @@ export async function startUI() {
     }
   }
 
-  renderDrops(getDrops().slice(0, 5), "drops-list");
+  // Render recent rooms on homepage
+  function renderHomeRooms() {
+    let list = getRooms();
+    list = list.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    renderRoomsList(list.slice(0, 5), async (r) => {
+      goto("rooms", { room: r.id });
+      await renderRoomsIfActive();
+    }, 'home-rooms-list');
+  }
+  renderHomeRooms();
+
   renderDrops(getDrops(), "drops-list-full");
 
   // Join room button
@@ -440,11 +449,13 @@ export async function startUI() {
             lastSeen: Date.now()
           });
           updateRoomsList();
+          renderHomeRooms(); // Update homepage list
         },
       });
 
       goto("rooms", { room: roomId });
       await renderRoomsIfActive();
+      renderHomeRooms(); // Update homepage list
       toast(`Joined room ${roomId}`);
     };
   }
@@ -472,6 +483,7 @@ export async function startUI() {
       thumbnailManager.queueFiles(roomId, added.files);
 
       await renderRoomsIfActive();
+      renderHomeRooms(); // Update homepage list
       toast("Files added to room");
     } catch (e) {
       console.error(e);
@@ -515,11 +527,13 @@ export async function startUI() {
       saveRoom({ id: rid, name: `Room ${rid.slice(0, 6)}`, createdAt: Date.now(), lastSeen: Date.now() });
       room = getRoom(rid);
       updateRoomsList();
+      renderHomeRooms(); // Update homepage list
     }
 
     // Update lastSeen for existing room
     saveRoom({ id: rid, lastSeen: Date.now() });
     updateRoomsList();
+    renderHomeRooms(); // Update homepage list
 
     // Set up thumbnail manager to watch this room's manifest
     const ydoc = await rooms.getYDoc(rid);
@@ -543,6 +557,7 @@ export async function startUI() {
           lastSeen: Date.now()
         });
         updateRoomsList();
+        renderHomeRooms(); // Update homepage list
         if (roomUI.getActiveRoom() === rid) {
           console.log(`[Bootstrap] Re-rendering room UI`);
           await roomUI.render(rid);
