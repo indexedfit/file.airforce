@@ -28,18 +28,40 @@ export function guessMime(name = "") {
 }
 
 export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
+  console.log(`[fetchFileAsBlob] START - name="${name}", cid="${cid}"`);
   let total = 0;
   const parts = [];
   let loaded = 0;
-  for await (const chunk of fs.cat(cid)) {
-    parts.push(chunk);
-    loaded += chunk.length || chunk.byteLength || 0;
-    onProgress(loaded, total);
+
+  try {
+    for await (const chunk of fs.cat(cid)) {
+      console.log(`[fetchFileAsBlob] Got chunk: type=${chunk.constructor.name}, length=${chunk.length || chunk.byteLength || 0}`);
+      parts.push(chunk);
+      loaded += chunk.length || chunk.byteLength || 0;
+      onProgress(loaded, total);
+    }
+
+    console.log(`[fetchFileAsBlob] All chunks received: total=${parts.length} chunks, ${loaded} bytes`);
+
+    const mimeType = guessMime(name);
+    console.log(`[fetchFileAsBlob] MIME type from name: "${mimeType}"`);
+
+    const blob = new Blob(parts, { type: mimeType });
+    console.log(`[fetchFileAsBlob] ✓ Blob created: size=${blob.size}, type="${blob.type}", chunks=${parts.length}`);
+    console.log(`[fetchFileAsBlob] Blob details:`, {
+      size: blob.size,
+      type: blob.type,
+      name: name,
+      cid: cid,
+      expectedType: mimeType,
+      matchesExpected: blob.type === mimeType
+    });
+
+    return blob;
+  } catch (err) {
+    console.error(`[fetchFileAsBlob] ✗ ERROR fetching ${name}:`, err);
+    throw err;
   }
-  const mimeType = guessMime(name);
-  const blob = new Blob(parts, { type: mimeType });
-  console.log(`[fetchFileAsBlob] Created blob for ${name}: size=${blob.size}, type=${blob.type}, chunks=${parts.length}`);
-  return blob;
 }
 
 /**

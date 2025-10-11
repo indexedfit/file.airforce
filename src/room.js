@@ -332,6 +332,14 @@ export class RoomUI {
         if (idx < 0 || idx >= files.length) return;
 
         const file = files[idx];
+        console.log(`[Room] ========== OPENING FILE ==========`);
+        console.log(`[Room] File index: ${idx}`);
+        console.log(`[Room] File details:`, {
+          name: file.name,
+          cid: file.cid,
+          size: file.size
+        });
+
         this.onProgress(true, 0, 0, "Opening…");
         try {
           // Use direct fetch for opening (no retry - should work immediately)
@@ -339,8 +347,16 @@ export class RoomUI {
             this.onProgress(true, loaded, total, `${loaded} bytes`);
           });
 
+          console.log(`[Room] ✓ Blob fetched successfully`);
+          console.log(`[Room] Blob before viewer:`, {
+            size: blob.size,
+            type: blob.type,
+            constructor: blob.constructor.name
+          });
+
           // Import and call showFileViewer with navigation
           const { showFileViewer } = await import('./file-viewer.js');
+          console.log(`[Room] Calling showFileViewer...`);
           await showFileViewer(blob, file.name, {
             currentIndex: idx,
             totalFiles: files.length,

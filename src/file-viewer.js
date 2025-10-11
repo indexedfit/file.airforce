@@ -51,20 +51,32 @@ async function createViewer(blob, name, mimeType) {
   console.log(`[FileViewer] Created URL: ${url.substring(0, 50)}...`)
 
   if (mimeType.startsWith('image/')) {
+    console.log(`[FileViewer] Creating image element...`);
     const img = document.createElement('img')
+
+    // Add error handler BEFORE setting src
+    img.onerror = (e) => {
+      console.error(`[FileViewer] ✗✗✗ IMAGE FAILED TO LOAD ✗✗✗`);
+      console.error(`[FileViewer] Error event:`, e);
+      console.error(`[FileViewer] Image src:`, img.src);
+      console.error(`[FileViewer] Blob type:`, blob.type);
+      console.error(`[FileViewer] Blob size:`, blob.size);
+      console.error(`[FileViewer] Expected MIME:`, mimeType);
+      console.error(`[FileViewer] URL:`, url);
+    }
+    img.onload = () => {
+      console.log(`[FileViewer] ✓✓✓ IMAGE LOADED SUCCESSFULLY ✓✓✓`);
+      console.log(`[FileViewer] Image:`, {
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+        src: img.src.substring(0, 100) + '...'
+      });
+    }
+
     img.src = url
     img.className = 'max-w-full max-h-full object-contain'
     img.alt = name
-
-    // Add error handler for debugging
-    img.onerror = (e) => {
-      console.error(`[FileViewer] Image failed to load:`, e)
-      console.error(`[FileViewer] Image src:`, img.src)
-      console.error(`[FileViewer] Blob type:`, blob.type)
-    }
-    img.onload = () => {
-      console.log(`[FileViewer] ✓ Image loaded successfully: ${name}`)
-    }
+    console.log(`[FileViewer] Image src set to: ${url.substring(0, 100)}...`);
 
     return { element: img, cleanup: () => URL.revokeObjectURL(url) }
   }
@@ -140,8 +152,17 @@ async function createViewer(blob, name, mimeType) {
  * @param {number} options.totalFiles - Total number of files
  */
 export async function showFileViewer(blob, name, options = {}) {
+  console.log(`[showFileViewer] ========== SHOW FILE VIEWER ==========`);
+  console.log(`[showFileViewer] Input blob:`, {
+    name: name,
+    size: blob.size,
+    type: blob.type,
+    constructor: blob.constructor.name
+  });
+
   const { onNext, onPrev, currentIndex, totalFiles } = options
   const mimeType = guessMime(name)
+  console.log(`[showFileViewer] Guessed MIME type: "${mimeType}"`);
 
   // Create modal if it doesn't exist
   if (!modal) {
