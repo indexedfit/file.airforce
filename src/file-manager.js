@@ -4,6 +4,8 @@
  * Extracted from bootstrap.js for clarity
  */
 
+import { CID } from 'multiformats/cid'
+
 export function guessMime(name = "") {
   const ext = (name.split(".").pop() || "").toLowerCase();
   const map = {
@@ -29,11 +31,27 @@ export function guessMime(name = "") {
 
 export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
   console.log(`[fetchFileAsBlob] START - name="${name}", cid="${cid}"`);
+  console.log(`[fetchFileAsBlob] CID type:`, typeof cid, cid.constructor?.name);
+
+  // iOS Safari fix: Parse CID string to CID object
+  // Helia expects CID objects, not strings, for reliable operation
+  if (typeof cid === 'string') {
+    console.log(`[fetchFileAsBlob] Converting string CID to CID object...`);
+    try {
+      cid = CID.parse(cid);
+      console.log(`[fetchFileAsBlob] ✓ CID parsed:`, cid.toString());
+    } catch (err) {
+      console.error(`[fetchFileAsBlob] Failed to parse CID:`, err);
+      throw new Error(`Invalid CID: ${cid}`);
+    }
+  }
+
   let total = 0;
   const parts = [];
   let loaded = 0;
 
   try {
+    console.log(`[fetchFileAsBlob] Calling fs.cat() with CID object...`);
     for await (const chunk of fs.cat(cid)) {
       console.log(`[fetchFileAsBlob] Got chunk: type=${chunk.constructor.name}, length=${chunk.length || chunk.byteLength || 0}`);
       parts.push(chunk);

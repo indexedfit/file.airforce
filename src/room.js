@@ -342,8 +342,8 @@ export class RoomUI {
 
         this.onProgress(true, 0, 0, "Opening…");
         try {
-          // Use direct fetch for opening (no retry - should work immediately)
-          const blob = await fetchFileAsBlob(this.fs, file.cid, file.name, (loaded, total) => {
+          // Use retry for opening - needed for bitswap sync (protobuf errors)
+          const blob = await fetchFileAsBlobWithRetry(this.fs, file.cid, file.name, (loaded, total) => {
             this.onProgress(true, loaded, total, `${loaded} bytes`);
           });
 
