@@ -4,6 +4,7 @@ import { ROOM_TOPIC } from './constants.js'
 import { renderRoomDetails, renderChatMessages } from './ui.js'
 import { getRoom } from './store.js'
 import { fetchFileAsBlob, openFile, downloadFile } from './file-manager.js'
+import { onThumbnailReady } from './thumbnail-events.js'
 
 /**
  * Simplified room manager using Y.js for state sync
@@ -290,6 +291,8 @@ export class RoomUI {
     this.onProgress = onProgress;
     this.activeRoomId = null;
     this.chatUnsub = null;
+    this.thumbnailUnsub = null;
+    this.thumbnails = {}; // cid -> data URL
   }
 
   setActiveRoom(roomId) {
@@ -506,13 +509,42 @@ export class RoomUI {
       id: roomId,
       name: room?.name || `Room ${roomId.slice(0, 6)}`,
       manifest,
-    });
+    }, { thumbnails: this.thumbnails });
     this.bindRoomButtons(roomId);
     await this.subscribeChat(roomId);
+    this.subscribeThumbnails(roomId);
+  }
+
+  subscribeThumbnails(roomId) {
+    if (this.thumbnailUnsub) {
+      this.thumbnailUnsub();
+      this.thumbnailUnsub = null;
+    }
+
+    this.thumbnailUnsub = onThumbnailReady(roomId, (cid, dataUrl) => {
+      // Store thumbnail
+      this.thumbnails[cid] = dataUrl;
+
+      // Update just the specific file's thumbnail in the DOM
+      if (roomId === this.activeRoomId) {
+        const li = document.querySelector(`#room-files li[data-cid="${cid}"]`);
+        if (li) {
+          const existingThumb = li.querySelector('img, div.w-8');
+          if (existingThumb) {
+            const newThumb = document.createElement('img');
+            newThumb.src = dataUrl;
+            newThumb.className = 'w-8 h-8 object-cover rounded border';
+            existingThumb.replaceWith(newThumb);
+          }
+        }
+      }
+    });
   }
 
   cleanup() {
     if (this.chatUnsub) this.chatUnsub();
     this.chatUnsub = null;
+    if (this.thumbnailUnsub) this.thumbnailUnsub();
+    this.thumbnailUnsub = null;
   }
 }

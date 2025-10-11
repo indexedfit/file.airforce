@@ -165,6 +165,8 @@ export function renderRoomDetails(room, opts = {}) {
   const root = $("rooms-info");
   if (!root) return;
   const files = room?.manifest?.files || [];
+  const thumbnails = opts.thumbnails || {}; // cid -> data URL
+
   root.innerHTML = `
     <div class="mb-3">
       <div class="flex items-center gap-2">
@@ -185,8 +187,20 @@ export function renderRoomDetails(room, opts = {}) {
         }
         <ul id="room-files" class="space-y-1">${files
           .map(
-            (f, idx) => `
-          <li class=\"flex items-center gap-2 cursor-pointer no-outline py-1\" data-idx=\"${idx}\" tabindex=\"0\">\n            <span class=\"flex-1 truncate text-sm\">${f.name}</span>\n            <span class=\"text-xs text-gray-500 whitespace-nowrap\">${formatBytes(f.size)}</span>\n            <button data-action=\"open-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-1 border rounded text-xs\">Open</button>\n            <button data-action=\"download-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-1 border rounded text-xs\">Download</button>\n          </li>`
+            (f, idx) => {
+              const thumbUrl = thumbnails[f.cid];
+              const thumbHtml = thumbUrl
+                ? `<img src="${thumbUrl}" class="w-8 h-8 object-cover rounded border" />`
+                : `<div class="w-8 h-8 flex items-center justify-center bg-gray-100 rounded border text-xs">📄</div>`;
+              return `
+          <li class="flex items-center gap-2 cursor-pointer no-outline py-1" data-idx="${idx}" data-cid="${f.cid}" tabindex="0">
+            ${thumbHtml}
+            <span class="flex-1 truncate text-sm">${f.name}</span>
+            <span class="text-xs text-gray-500 whitespace-nowrap">${formatBytes(f.size)}</span>
+            <button data-action="open-file" data-cid="${f.cid}" data-name="${f.name}" class="px-2 py-1 border rounded text-xs">Open</button>
+            <button data-action="download-file" data-cid="${f.cid}" data-name="${f.name}" class="px-2 py-1 border rounded text-xs">Download</button>
+          </li>`;
+            }
           )
           .join("")}</ul>
 

@@ -52,6 +52,7 @@ import {
   updateProgress,
   renderRoomsList,
 } from "./ui.js";
+import { createThumbnailManager } from "./thumbnail-manager.js";
 import {
   saveDrop,
   getDrops,
@@ -89,7 +90,7 @@ import { RoomUI } from "./room.js";
 
 const $ = (id) => document.getElementById(id);
 
-let helia, fs, libp2p, rooms;
+let helia, fs, libp2p, rooms, thumbnailManager;
 let roomUI;
 
 
@@ -182,6 +183,7 @@ function showInvite(link) {
 export async function startUI() {
   ({ helia, fs, libp2p } = await startHelia());
   rooms = createRoomManager(helia, fs);
+  thumbnailManager = await createThumbnailManager(fs);
 
   // Initialize room UI manager
   roomUI = new RoomUI({
@@ -372,15 +374,6 @@ export async function startUI() {
         files: manifest.files,
       };
 
-      // Pin files locally
-      for (const f of manifest.files) {
-        try {
-          for await (const _ of helia.pin.add(f.cid)) {}
-        } catch {}
-      }
-
-      // Hub proactively pins files via manifest observer - no HTTP upload needed
-
       const room = {
         id: randId(),
         name: $("room-name")?.value?.trim() || defaultName,
@@ -391,6 +384,9 @@ export async function startUI() {
 
       saveDrop({ ...drop, roomId: room.id });
       saveRoom(room);
+
+      // Queue thumbnails (blocks already in blockstore from addBytes)
+      thumbnailManager.queueFiles(room.id, manifest.files);
 
       // Join as host
       await rooms.join(room.id, { manifest });
@@ -472,14 +468,8 @@ export async function startUI() {
       saveRoom({ id: roomId, manifest: merged });
       rooms.setManifest(roomId, merged);
 
-      // Pin locally
-      for (const f of added.files) {
-        try {
-          for await (const _ of helia.pin.add(f.cid)) {}
-        } catch {}
-      }
-
-      // Hub proactively pins files via manifest observer - no HTTP upload needed
+      // Queue thumbnails for new files
+      thumbnailManager.queueFiles(roomId, added.files);
 
       await renderRoomsIfActive();
       toast("Files added to room");
@@ -526,6 +516,16 @@ export async function startUI() {
     saveRoom({ id: rid, lastSeen: Date.now() });
     updateRoomsList();
 
+    // Set up thumbnail manager to watch this room's manifest
+    const ydoc = await rooms.getYDoc(rid);
+    const watchCallback = thumbnailManager.watchRoom(rid, () => {
+      const files = ydoc.manifest.get('files') || [];
+      return { files: files.map(f => ({ ...f })) };
+    });
+    ydoc.manifest.observe(watchCallback);
+    // Trigger initial check
+    watchCallback();
+
     // Join room (handles both host and joiner)
     await rooms.join(rid, {
       onManifestUpdate: async (manifest) => {
@@ -544,26 +544,6 @@ export async function startUI() {
         } else {
           console.log(`[Bootstrap] Not active room, skipping render`);
         }
-      },
-      onNewFiles: async (newCids) => {
-        const room = getRoom(rid);
-        const filesByCid = new Map(room?.manifest?.files?.map(f => [f.cid, f]) || []);
-
-        for (let i = 0; i < newCids.length; i++) {
-          const cid = newCids[i];
-          const file = filesByCid.get(cid);
-          const name = file?.name || cid.slice(0, 8);
-          const size = file?.size ? formatBytes(file.size) : '';
-
-          showFetchProgress(true, i + 1, newCids.length, `${name} ${size}`.trim());
-
-          try {
-            for await (const _ of helia.pin.add(cid)) { }
-          } catch (err) {
-            console.warn(`Failed to pin ${cid}:`, err.message);
-          }
-        }
-        showFetchProgress(false);
       },
     });
 
