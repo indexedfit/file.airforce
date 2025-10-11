@@ -4,6 +4,7 @@ import { ROOM_TOPIC } from './constants.js'
 import { renderRoomDetails, renderChatMessages } from './ui.js'
 import { getRoom } from './store.js'
 import { fetchFileAsBlob, openFile, downloadFile } from './file-manager.js'
+import { onThumbnailReady } from './thumbnail-events.js'
 
 /**
  * Simplified room manager using Y.js for state sync
@@ -290,6 +291,9 @@ export class RoomUI {
     this.onProgress = onProgress;
     this.activeRoomId = null;
     this.chatUnsub = null;
+    this.thumbnailUnsub = null;
+    this.thumbnails = {}; // cid -> data URL
+    this.viewMode = localStorage.getItem('room-view-mode') || 'list'; // Persist preference
   }
 
   setActiveRoom(roomId) {
@@ -301,47 +305,106 @@ export class RoomUI {
   }
 
   bindRoomButtons(roomId) {
+    // View mode toggle buttons
+    const btnList = document.getElementById("btn-view-list");
+    const btnGrid = document.getElementById("btn-view-grid");
+    if (btnList) {
+      btnList.onclick = () => {
+        this.viewMode = 'list';
+        localStorage.setItem('room-view-mode', 'list');
+        this.render(roomId);
+      };
+    }
+    if (btnGrid) {
+      btnGrid.onclick = () => {
+        this.viewMode = 'grid';
+        localStorage.setItem('room-view-mode', 'grid');
+        this.render(roomId);
+      };
+    }
+
     const filesUl = document.getElementById("room-files");
     if (filesUl) {
-      filesUl.onclick = async (e) => {
-        const target = e.target.closest("button[data-action]");
-        if (!target) {
-          const li = e.target.closest("li[data-idx]");
-          if (!li) return;
-          filesUl.querySelectorAll("li").forEach((n) => n.classList.remove("is-selected"));
-          li.classList.add("is-selected");
-          return;
-        }
-        const action = target.dataset.action;
-        const cid = target.dataset.cid;
-        const name = target.dataset.name || "file";
-        if (!cid) return;
+      // Helper to open file with navigation
+      const openFileWithNav = async (idx) => {
+        const manifest = await this.rooms.getManifest(roomId);
+        const files = manifest?.files || [];
+        if (idx < 0 || idx >= files.length) return;
+
+        const file = files[idx];
+        this.onProgress(true, 0, 0, "Opening…");
         try {
-          const label = action === "open-file" ? "Opening…" : "Downloading…";
-          this.onProgress(true, 0, 0, label);
-          const blob = await fetchFileAsBlob(this.fs, cid, name, (loaded, total) => {
+          const blob = await fetchFileAsBlob(this.fs, file.cid, file.name, (loaded, total) => {
             this.onProgress(true, loaded, total, `${loaded} bytes`);
           });
-          if (action === "open-file") openFile(blob, name);
-          else if (action === "download-file") downloadFile(blob, name);
+
+          // Import and call showFileViewer with navigation
+          const { showFileViewer } = await import('./file-viewer.js');
+          await showFileViewer(blob, file.name, {
+            currentIndex: idx,
+            totalFiles: files.length,
+            onNext: () => {
+              if (idx < files.length - 1) openFileWithNav(idx + 1);
+            },
+            onPrev: () => {
+              if (idx > 0) openFileWithNav(idx - 1);
+            }
+          });
         } catch (err) {
           console.error(err);
         } finally {
           this.onProgress(false);
         }
       };
-      filesUl.ondblclick = () => {
-        const li = filesUl.querySelector("li.is-selected") || filesUl.querySelector('li[data-idx="0"]');
-        if (!li) return;
-        const btn = li.querySelector('button[data-action="open-file"]');
-        btn?.click();
+
+      filesUl.onclick = async (e) => {
+        const target = e.target.closest("button[data-action]");
+
+        // Handle download button
+        if (target?.dataset.action === "download-file") {
+          const cid = target.dataset.cid;
+          const name = target.dataset.name || "file";
+          if (!cid) return;
+          try {
+            this.onProgress(true, 0, 0, "Downloading…");
+            const blob = await fetchFileAsBlob(this.fs, cid, name, (loaded, total) => {
+              this.onProgress(true, loaded, total, `${loaded} bytes`);
+            });
+            downloadFile(blob, name);
+          } catch (err) {
+            console.error(err);
+          } finally {
+            this.onProgress(false);
+          }
+          return;
+        }
+
+        // Single-click on list item or "Open" button opens file with navigation
+        const clickedItem = e.target.closest("[data-idx]");
+        const openButton = target?.dataset.action === "open-file";
+
+        if (clickedItem || openButton) {
+          const item = clickedItem || target.closest("[data-idx]");
+          if (!item) return;
+
+          const idx = parseInt(item.dataset.idx, 10);
+          if (isNaN(idx)) return;
+
+          // Update selection
+          filesUl.querySelectorAll("[data-idx]").forEach((n) => n.classList.remove("is-selected"));
+          item.classList.add("is-selected");
+
+          // Open file with navigation
+          await openFileWithNav(idx);
+        }
       };
+
       filesUl.onkeydown = (e) => {
         const tag = (e.target?.tagName || "").toLowerCase();
         if (tag === "input" || tag === "textarea") return;
         if (!["ArrowDown", "ArrowUp", "Enter"].includes(e.key)) return;
         e.preventDefault();
-        const items = Array.from(filesUl.querySelectorAll("li[data-idx]"));
+        const items = Array.from(filesUl.querySelectorAll("[data-idx]"));
         if (!items.length) return;
         let idx = items.findIndex((n) => n.classList.contains("is-selected"));
         if (idx < 0) idx = 0;
@@ -352,12 +415,14 @@ export class RoomUI {
         sel.classList.add("is-selected");
         sel.focus();
         if (e.key === "Enter") {
-          const btn = sel.querySelector('button[data-action="open-file"]');
-          btn?.click();
+          const fileIdx = parseInt(sel.dataset.idx, 10);
+          if (!isNaN(fileIdx)) {
+            openFileWithNav(fileIdx);
+          }
         }
       };
       queueMicrotask(() => {
-        const first = filesUl.querySelector('li[data-idx="0"]');
+        const first = filesUl.querySelector('[data-idx="0"]');
         if (first) first.classList.add("is-selected");
       });
     }
@@ -381,19 +446,12 @@ export class RoomUI {
       };
     }
 
-    const copyBtn = document.getElementById("btn-copy-room-link");
-    if (copyBtn) {
-      copyBtn.onclick = () => {
+    const shareBtn = document.getElementById("btn-share-room");
+    if (shareBtn) {
+      shareBtn.onclick = () => {
         try {
           const link = this.buildInviteURL(roomId);
-          navigator.clipboard.writeText(link).then(() => {
-            const toast = document.getElementById("toast");
-            if (toast) {
-              toast.textContent = "Link copied";
-              toast.hidden = false;
-              setTimeout(() => (toast.hidden = true), 2000);
-            }
-          });
+          this.showRoomQR(link);
         } catch (e) {
           console.error(e);
         }
@@ -406,6 +464,67 @@ export class RoomUI {
     u.searchParams.set("view", "rooms");
     u.searchParams.set("room", roomId);
     return u.toString();
+  }
+
+  async showRoomQR(link) {
+    // Import QRCode dynamically if needed
+    const QRCode = (await import('qrcode')).default;
+
+    // Create or show QR modal
+    let modal = document.getElementById("room-qr-modal");
+    if (!modal) {
+      modal = document.createElement("div");
+      modal.id = "room-qr-modal";
+      modal.className = "fixed inset-0 bg-black/50 flex items-center justify-center z-50";
+      modal.innerHTML = `
+        <div class="bg-white rounded-lg p-6 max-w-sm mx-4 relative">
+          <button id="close-qr-modal" class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-2xl leading-none">&times;</button>
+          <h3 class="font-semibold mb-3">Share room</h3>
+          <canvas id="room-qr-canvas" class="w-full border rounded mb-3"></canvas>
+          <div class="text-sm text-gray-600 break-all mb-2">${link}</div>
+          <button id="copy-qr-link" class="w-full px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Copy link</button>
+        </div>
+      `;
+      document.body.appendChild(modal);
+    }
+
+    // Update link text
+    modal.querySelector(".text-sm").textContent = link;
+
+    // Generate QR code
+    const canvas = modal.querySelector("#room-qr-canvas");
+    try {
+      await QRCode.toCanvas(canvas, link, { width: 256, margin: 1 });
+    } catch (err) {
+      console.error("QR generation failed:", err);
+    }
+
+    // Show modal
+    modal.classList.remove("hidden");
+
+    // Bind close button
+    modal.querySelector("#close-qr-modal").onclick = () => {
+      modal.classList.add("hidden");
+    };
+
+    // Close on backdrop click
+    modal.onclick = (e) => {
+      if (e.target === modal) {
+        modal.classList.add("hidden");
+      }
+    };
+
+    // Bind copy button
+    modal.querySelector("#copy-qr-link").onclick = () => {
+      navigator.clipboard.writeText(link).then(() => {
+        const btn = modal.querySelector("#copy-qr-link");
+        const originalText = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => {
+          btn.textContent = originalText;
+        }, 2000);
+      });
+    };
   }
 
   async subscribeChat(roomId) {
@@ -433,13 +552,48 @@ export class RoomUI {
       id: roomId,
       name: room?.name || `Room ${roomId.slice(0, 6)}`,
       manifest,
-    });
+    }, { thumbnails: this.thumbnails, viewMode: this.viewMode });
     this.bindRoomButtons(roomId);
     await this.subscribeChat(roomId);
+    this.subscribeThumbnails(roomId);
+  }
+
+  subscribeThumbnails(roomId) {
+    if (this.thumbnailUnsub) {
+      this.thumbnailUnsub();
+      this.thumbnailUnsub = null;
+    }
+
+    this.thumbnailUnsub = onThumbnailReady(roomId, (cid, dataUrl) => {
+      // Store thumbnail
+      this.thumbnails[cid] = dataUrl;
+
+      // Update just the specific file's thumbnail in the DOM
+      if (roomId === this.activeRoomId) {
+        // Works for both list and grid views
+        const element = document.querySelector(`#room-files [data-cid="${cid}"]`);
+        if (element) {
+          const existingThumb = element.querySelector('img, div.w-10, div.w-full');
+          if (existingThumb) {
+            const newThumb = document.createElement('img');
+            newThumb.src = dataUrl;
+            // Different sizes for list vs grid
+            if (this.viewMode === 'grid') {
+              newThumb.className = 'w-full h-32 object-cover rounded-t';
+            } else {
+              newThumb.className = 'w-10 h-10 object-cover rounded border flex-shrink-0';
+            }
+            existingThumb.replaceWith(newThumb);
+          }
+        }
+      }
+    });
   }
 
   cleanup() {
     if (this.chatUnsub) this.chatUnsub();
     this.chatUnsub = null;
+    if (this.thumbnailUnsub) this.thumbnailUnsub();
+    this.thumbnailUnsub = null;
   }
 }

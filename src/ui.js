@@ -132,6 +132,52 @@ export function updateProgress(pct, label = "") {
 }
 
 // -------- Rooms & Chat rendering --------
+function renderFilesList(files, thumbnails) {
+  return `<ul id="room-files" class="space-y-1 max-h-96 overflow-y-auto">${files
+    .map((f, idx) => {
+      const thumbUrl = thumbnails[f.cid];
+      const thumbHtml = thumbUrl
+        ? `<img src="${thumbUrl}" class="w-10 h-10 object-cover rounded border flex-shrink-0" />`
+        : `<div class="w-10 h-10 flex items-center justify-center bg-gray-100 rounded border text-lg flex-shrink-0">📄</div>`;
+      return `
+        <li class="flex items-center gap-2 p-2 hover:bg-gray-50 rounded cursor-pointer min-h-[3.5rem]" data-idx="${idx}" data-cid="${f.cid}" tabindex="0">
+          ${thumbHtml}
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-medium truncate">${f.name}</div>
+            <div class="text-xs text-gray-500">${formatBytes(f.size)}</div>
+          </div>
+          <div class="flex gap-1 flex-shrink-0">
+            <button data-action="open-file" data-cid="${f.cid}" data-name="${f.name}" class="px-2 py-1 border rounded text-xs hover:bg-gray-100">Open</button>
+            <button data-action="download-file" data-cid="${f.cid}" data-name="${f.name}" class="px-2 py-1 border rounded text-xs hover:bg-gray-100">↓</button>
+          </div>
+        </li>`;
+    })
+    .join("")}</ul>`;
+}
+
+function renderFilesGrid(files, thumbnails) {
+  return `<div id="room-files" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 max-h-96 overflow-y-auto">${files
+    .map((f, idx) => {
+      const thumbUrl = thumbnails[f.cid];
+      const thumbHtml = thumbUrl
+        ? `<img src="${thumbUrl}" class="w-full h-32 object-cover rounded-t" />`
+        : `<div class="w-full h-32 flex items-center justify-center bg-gray-100 rounded-t text-4xl">📄</div>`;
+      return `
+        <div class="border rounded overflow-hidden hover:shadow-lg transition-shadow cursor-pointer" data-idx="${idx}" data-cid="${f.cid}" tabindex="0">
+          ${thumbHtml}
+          <div class="p-2 bg-white">
+            <div class="text-xs font-medium truncate mb-1" title="${f.name}">${f.name}</div>
+            <div class="text-xs text-gray-500">${formatBytes(f.size)}</div>
+            <div class="flex gap-1 mt-2">
+              <button data-action="open-file" data-cid="${f.cid}" data-name="${f.name}" class="flex-1 px-2 py-1 border rounded text-xs hover:bg-gray-100">Open</button>
+              <button data-action="download-file" data-cid="${f.cid}" data-name="${f.name}" class="px-2 py-1 border rounded text-xs hover:bg-gray-100">↓</button>
+            </div>
+          </div>
+        </div>`;
+    })
+    .join("")}</div>`;
+}
+
 export function renderRoomsList(rooms, onOpen) {
   const ul = $("rooms-list");
   if (!ul) return;
@@ -165,13 +211,20 @@ export function renderRoomDetails(room, opts = {}) {
   const root = $("rooms-info");
   if (!root) return;
   const files = room?.manifest?.files || [];
+  const thumbnails = opts.thumbnails || {}; // cid -> data URL
+  const viewMode = opts.viewMode || 'list'; // 'list' or 'grid'
+
   root.innerHTML = `
     <div class="mb-3">
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 flex-wrap">
         <div class="font-semibold">${
           room?.name || "(room)"
         } <span class="text-xs text-gray-500">${room?.id || ""}</span></div>
-        <button id="btn-copy-room-link" class="ml-auto px-2 py-1 border rounded text-xs">Copy link</button>
+        <div class="ml-auto flex items-center gap-2">
+          <button id="btn-view-list" class="px-2 py-1 border rounded text-xs ${viewMode === 'list' ? 'bg-gray-200' : ''}">List</button>
+          <button id="btn-view-grid" class="px-2 py-1 border rounded text-xs ${viewMode === 'grid' ? 'bg-gray-200' : ''}">Grid</button>
+          <button id="btn-share-room" class="px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">Share</button>
+        </div>
       </div>
     </div>
     <div class="grid md:grid-cols-2 gap-4">
@@ -182,12 +235,7 @@ export function renderRoomDetails(room, opts = {}) {
             ? ""
             : '<div class="text-sm text-gray-600">No files yet.</div>'
         }
-        <ul id="room-files" class="space-y-1">${files
-          .map(
-            (f, idx) => `
-          <li class=\"flex items-center gap-2 cursor-pointer no-outline py-1\" data-idx=\"${idx}\" tabindex=\"0\">\n            <span class=\"flex-1 truncate text-sm\">${f.name}</span>\n            <span class=\"text-xs text-gray-500 whitespace-nowrap\">${formatBytes(f.size)}</span>\n            <button data-action=\"open-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-1 border rounded text-xs\">Open</button>\n            <button data-action=\"download-file\" data-cid=\"${f.cid}\" data-name=\"${f.name}\" class=\"px-2 py-1 border rounded text-xs\">Download</button>\n          </li>`
-          )
-          .join("")}</ul>
+        ${viewMode === 'list' ? renderFilesList(files, thumbnails) : renderFilesGrid(files, thumbnails)}
 
         <div class="mt-4 p-3 bg-gray-50 border rounded">
           <div class="font-medium mb-1">Add files to this room</div>
