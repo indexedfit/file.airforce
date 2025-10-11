@@ -115,10 +115,21 @@ export async function createThumbnailManager(fs) {
   }
 
   /**
+   * Check if file type supports thumbnails
+   */
+  function supportsThumb(name) {
+    const mime = guessMimeType(name)
+    return mime.startsWith('image/') || mime.startsWith('video/') || mime === 'application/pdf'
+  }
+
+  /**
    * Queue files for thumbnail generation
    */
   function queueFiles(roomId, files) {
-    const newPending = files.filter(f => !pending.has(f.cid))
+    // Only queue files that support thumbnails
+    const newPending = files.filter(f =>
+      !pending.has(f.cid) && supportsThumb(f.name)
+    )
 
     for (const file of newPending) {
       pending.set(file.cid, {

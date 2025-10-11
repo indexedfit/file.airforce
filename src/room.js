@@ -293,6 +293,7 @@ export class RoomUI {
     this.chatUnsub = null;
     this.thumbnailUnsub = null;
     this.thumbnails = {}; // cid -> data URL
+    this.viewMode = localStorage.getItem('room-view-mode') || 'list'; // Persist preference
   }
 
   setActiveRoom(roomId) {
@@ -304,6 +305,24 @@ export class RoomUI {
   }
 
   bindRoomButtons(roomId) {
+    // View mode toggle buttons
+    const btnList = document.getElementById("btn-view-list");
+    const btnGrid = document.getElementById("btn-view-grid");
+    if (btnList) {
+      btnList.onclick = () => {
+        this.viewMode = 'list';
+        localStorage.setItem('room-view-mode', 'list');
+        this.render(roomId);
+      };
+    }
+    if (btnGrid) {
+      btnGrid.onclick = () => {
+        this.viewMode = 'grid';
+        localStorage.setItem('room-view-mode', 'grid');
+        this.render(roomId);
+      };
+    }
+
     const filesUl = document.getElementById("room-files");
     if (filesUl) {
       filesUl.onclick = async (e) => {
@@ -509,7 +528,7 @@ export class RoomUI {
       id: roomId,
       name: room?.name || `Room ${roomId.slice(0, 6)}`,
       manifest,
-    }, { thumbnails: this.thumbnails });
+    }, { thumbnails: this.thumbnails, viewMode: this.viewMode });
     this.bindRoomButtons(roomId);
     await this.subscribeChat(roomId);
     this.subscribeThumbnails(roomId);
@@ -527,13 +546,19 @@ export class RoomUI {
 
       // Update just the specific file's thumbnail in the DOM
       if (roomId === this.activeRoomId) {
-        const li = document.querySelector(`#room-files li[data-cid="${cid}"]`);
-        if (li) {
-          const existingThumb = li.querySelector('img, div.w-8');
+        // Works for both list and grid views
+        const element = document.querySelector(`#room-files [data-cid="${cid}"]`);
+        if (element) {
+          const existingThumb = element.querySelector('img, div.w-10, div.w-full');
           if (existingThumb) {
             const newThumb = document.createElement('img');
             newThumb.src = dataUrl;
-            newThumb.className = 'w-8 h-8 object-cover rounded border';
+            // Different sizes for list vs grid
+            if (this.viewMode === 'grid') {
+              newThumb.className = 'w-full h-32 object-cover rounded-t';
+            } else {
+              newThumb.className = 'w-10 h-10 object-cover rounded border flex-shrink-0';
+            }
             existingThumb.replaceWith(newThumb);
           }
         }
