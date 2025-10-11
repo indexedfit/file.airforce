@@ -35,25 +35,38 @@ async function blobToDataURL(blob) {
  * Create viewer content based on file type
  */
 async function createViewer(blob, name, mimeType) {
-  // iOS Safari workaround: Recreate blob with explicit type to fix MIME detection
-  // Safari sometimes fails when blob type is incorrect or missing
-  const useSafari = isSafariOrIOS()
+  // iOS Safari fix: Always ensure blob has correct MIME type
+  // Safari is strict about MIME types and can drop them during blob operations
+  console.log(`[FileViewer] Creating viewer for ${name}: blob.type="${blob.type}", expected="${mimeType}", size=${blob.size}`)
 
-  // For Safari, ensure blob has correct type before converting to data URL
-  if (useSafari && blob.type !== mimeType) {
-    console.log(`[FileViewer] Safari: Recreating blob with correct type ${mimeType} (was ${blob.type})`)
+  if (blob.type !== mimeType) {
+    console.log(`[FileViewer] MIME type mismatch - recreating blob with correct type`)
     blob = new Blob([blob], { type: mimeType })
+    console.log(`[FileViewer] After recreate: blob.type="${blob.type}", size=${blob.size}`)
   }
 
-  const url = useSafari ? await blobToDataURL(blob) : URL.createObjectURL(blob)
+  // Use blob URLs for all browsers (faster, no size limit)
+  // Safari iOS CAN handle blob URLs if the MIME type is correct
+  const url = URL.createObjectURL(blob)
+  console.log(`[FileViewer] Created URL: ${url.substring(0, 50)}...`)
 
   if (mimeType.startsWith('image/')) {
     const img = document.createElement('img')
     img.src = url
     img.className = 'max-w-full max-h-full object-contain'
     img.alt = name
-    // Only revoke blob URLs, not data URLs
-    return { element: img, cleanup: () => !useSafari && URL.revokeObjectURL(url) }
+
+    // Add error handler for debugging
+    img.onerror = (e) => {
+      console.error(`[FileViewer] Image failed to load:`, e)
+      console.error(`[FileViewer] Image src:`, img.src)
+      console.error(`[FileViewer] Blob type:`, blob.type)
+    }
+    img.onload = () => {
+      console.log(`[FileViewer] ✓ Image loaded successfully: ${name}`)
+    }
+
+    return { element: img, cleanup: () => URL.revokeObjectURL(url) }
   }
 
   if (mimeType.startsWith('video/')) {
@@ -62,8 +75,7 @@ async function createViewer(blob, name, mimeType) {
     video.controls = true
     video.playsInline = true // Prevents fullscreen on iOS
     video.className = 'max-w-full max-h-full'
-    // Only revoke blob URLs, not data URLs
-    return { element: video, cleanup: () => !useSafari && URL.revokeObjectURL(url) }
+    return { element: video, cleanup: () => URL.revokeObjectURL(url) }
   }
 
   if (mimeType.startsWith('audio/')) {
@@ -84,8 +96,7 @@ async function createViewer(blob, name, mimeType) {
     audio.className = 'w-full max-w-md'
 
     container.append(icon, fileName, audio)
-    // Only revoke blob URLs, not data URLs
-    return { element: container, cleanup: () => !useSafari && URL.revokeObjectURL(url) }
+    return { element: container, cleanup: () => URL.revokeObjectURL(url) }
   }
 
   if (mimeType.startsWith('text/')) {
