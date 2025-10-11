@@ -39,6 +39,36 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
   return new Blob(parts, { type: guessMime(name) });
 }
 
+/**
+ * Fetch file with retry logic for iOS Safari protobuf errors
+ * iOS Safari sometimes fails on first attempt but succeeds on retry
+ */
+export async function fetchFileAsBlobWithRetry(fs, cid, name, onProgress = () => {}, maxRetries = 10) {
+  let lastError = null;
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fetchFileAsBlob(fs, cid, name, onProgress);
+    } catch (err) {
+      lastError = err;
+      const isProtobufError = err.message?.includes('protobuf') || err.message?.includes('wireType');
+
+      if (isProtobufError && attempt < maxRetries - 1) {
+        // Wait briefly before retry (exponential backoff)
+        const delay = Math.min(100 * Math.pow(1.5, attempt), 1000);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        console.log(`[fetchFile] Retry ${attempt + 1}/${maxRetries} for ${name}...`);
+        continue;
+      }
+
+      // Not a protobuf error or out of retries
+      throw err;
+    }
+  }
+
+  throw lastError;
+}
+
 export async function addFilesAndCreateManifest(fs, files, onProgress = () => {}) {
   console.log(`[addFiles] Starting with ${files.length} files`);
   const manifest = { files: [], updatedAt: Date.now() };

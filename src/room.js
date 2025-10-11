@@ -3,7 +3,7 @@ import { createYDoc, updateManifest, addChatMsg, getChatMessages } from './ydoc.
 import { ROOM_TOPIC } from './constants.js'
 import { renderRoomDetails, renderChatMessages } from './ui.js'
 import { getRoom } from './store.js'
-import { fetchFileAsBlob, openFile, downloadFile } from './file-manager.js'
+import { fetchFileAsBlob, fetchFileAsBlobWithRetry, openFile, downloadFile } from './file-manager.js'
 import { onThumbnailReady } from './thumbnail-events.js'
 
 /**
@@ -334,7 +334,7 @@ export class RoomUI {
         const file = files[idx];
         this.onProgress(true, 0, 0, "Opening…");
         try {
-          const blob = await fetchFileAsBlob(this.fs, file.cid, file.name, (loaded, total) => {
+          const blob = await fetchFileAsBlobWithRetry(this.fs, file.cid, file.name, (loaded, total) => {
             this.onProgress(true, loaded, total, `${loaded} bytes`);
           });
 
@@ -373,7 +373,7 @@ export class RoomUI {
           if (!cid) return;
           try {
             this.onProgress(true, 0, 0, "Downloading…");
-            const blob = await fetchFileAsBlob(this.fs, cid, name, (loaded, total) => {
+            const blob = await fetchFileAsBlobWithRetry(this.fs, cid, name, (loaded, total) => {
               this.onProgress(true, loaded, total, `${loaded} bytes`);
             });
             downloadFile(blob, name);
