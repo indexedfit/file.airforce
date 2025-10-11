@@ -524,6 +524,7 @@ export async function startUI() {
 
     // Update lastSeen for existing room
     saveRoom({ id: rid, lastSeen: Date.now() });
+    updateRoomsList();
 
     // Join room (handles both host and joiner)
     await rooms.join(rid, {

@@ -382,10 +382,12 @@ export class RoomUI {
     }
 
     const copyBtn = document.getElementById("btn-copy-room-link");
+    const shareBtn = document.getElementById("btn-share-room");
     if (copyBtn) {
       copyBtn.onclick = () => {
         try {
           const link = this.buildInviteURL(roomId);
+          this.showRoomQR(link);
           navigator.clipboard.writeText(link).then(() => {
             const toast = document.getElementById("toast");
             if (toast) {
@@ -399,6 +401,16 @@ export class RoomUI {
         }
       };
     }
+    if (shareBtn) {
+      shareBtn.onclick = () => {
+        try {
+          const link = this.buildInviteURL(roomId);
+          this.showRoomQR(link);
+        } catch (e) {
+          console.error(e);
+        }
+      };
+    }
   }
 
   buildInviteURL(roomId) {
@@ -406,6 +418,67 @@ export class RoomUI {
     u.searchParams.set("view", "rooms");
     u.searchParams.set("room", roomId);
     return u.toString();
+  }
+
+  async showRoomQR(link) {
+    // Import QRCode dynamically if needed
+    const QRCode = (await import('qrcode')).default;
+
+    // Create or show QR modal
+    let modal = document.getElementById("room-qr-modal");
+    if (!modal) {
+      modal = document.createElement("div");
+      modal.id = "room-qr-modal";
+      modal.className = "fixed inset-0 bg-black/50 flex items-center justify-center z-50";
+      modal.innerHTML = `
+        <div class="bg-white rounded-lg p-6 max-w-sm mx-4 relative">
+          <button id="close-qr-modal" class="absolute top-2 right-2 text-gray-500 hover:text-gray-700 text-2xl leading-none">&times;</button>
+          <h3 class="font-semibold mb-3">Share room</h3>
+          <canvas id="room-qr-canvas" class="w-full border rounded mb-3"></canvas>
+          <div class="text-sm text-gray-600 break-all mb-2">${link}</div>
+          <button id="copy-qr-link" class="w-full px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">Copy link</button>
+        </div>
+      `;
+      document.body.appendChild(modal);
+    }
+
+    // Update link text
+    modal.querySelector(".text-sm").textContent = link;
+
+    // Generate QR code
+    const canvas = modal.querySelector("#room-qr-canvas");
+    try {
+      await QRCode.toCanvas(canvas, link, { width: 256, margin: 1 });
+    } catch (err) {
+      console.error("QR generation failed:", err);
+    }
+
+    // Show modal
+    modal.classList.remove("hidden");
+
+    // Bind close button
+    modal.querySelector("#close-qr-modal").onclick = () => {
+      modal.classList.add("hidden");
+    };
+
+    // Close on backdrop click
+    modal.onclick = (e) => {
+      if (e.target === modal) {
+        modal.classList.add("hidden");
+      }
+    };
+
+    // Bind copy button
+    modal.querySelector("#copy-qr-link").onclick = () => {
+      navigator.clipboard.writeText(link).then(() => {
+        const btn = modal.querySelector("#copy-qr-link");
+        const originalText = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => {
+          btn.textContent = originalText;
+        }, 2000);
+      });
+    };
   }
 
   async subscribeChat(roomId) {

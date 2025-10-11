@@ -171,7 +171,8 @@ export function renderRoomDetails(room, opts = {}) {
         <div class="font-semibold">${
           room?.name || "(room)"
         } <span class="text-xs text-gray-500">${room?.id || ""}</span></div>
-        <button id="btn-copy-room-link" class="ml-auto px-2 py-1 border rounded text-xs">Copy link</button>
+        <button id="btn-share-room" class="ml-auto px-2 py-1 bg-blue-600 text-white rounded text-xs hover:bg-blue-700">Share</button>
+        <button id="btn-copy-room-link" class="px-2 py-1 border rounded text-xs">Copy link</button>
       </div>
     </div>
     <div class="grid md:grid-cols-2 gap-4">
