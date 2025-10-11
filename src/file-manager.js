@@ -6,66 +6,65 @@
 
 import { CID } from 'multiformats/cid'
 import { decode as decodeDagPb } from '@ipld/dag-pb'
+import { UnixFS } from 'ipfs-unixfs'
 
 /**
  * Detect and unwrap dag-pb + UnixFS protobuf encoding from raw blocks
  *
  * BUG WORKAROUND: Some blocks arrive from bitswap with dag-pb wrapping even when
- * the CID codec indicates raw (0x55). This appears to be a Helia bitswap bug on
- * iOS Safari where remote blocks are re-encoded during transfer.
+ * the CID codec indicates raw (0x55). This is a Helia bitswap bug where remote
+ * blocks are stored with UnixFS metadata wrapping.
  *
- * Root cause: CID says "raw codec" but actual block bytes have dag-pb PBNode wrapper.
+ * Root cause: CID says "raw codec" but actual block bytes have dag-pb PBNode + UnixFS wrapper.
  * fs.cat() trusts the CID codec and doesn't unwrap, causing corrupt data.
  *
- * This function detects dag-pb signature (0x0a) and manually unwraps the PBNode.Data field.
+ * This function detects protobuf signature (0x0a) and manually unwraps to get raw file data.
  */
 function unwrapDagPb(bytes) {
   try {
-    // Check if bytes start with dag-pb signature (0x0a = field 1, wire type 2)
+    // Check if bytes start with protobuf signature (0x0a = field 1, wire type 2)
     if (bytes[0] === 0x0a) {
-      console.log('[unwrapDagPb] ⚠️  Detected dag-pb wrapper on block with raw CID codec!')
-      console.log('[unwrapDagPb] This is a Helia bitswap bug - CID codec says raw but block is wrapped')
+      console.log('[unwrapDagPb] ⚠️  Detected protobuf wrapper on block with raw CID codec!')
 
-      // Decode the dag-pb PBNode
-      const node = decodeDagPb(bytes)
+      // First try: dag-pb PBNode decoding
+      try {
+        const node = decodeDagPb(bytes)
+        if (node.Data) {
+          console.log(`[unwrapDagPb] dag-pb unwrap: ${bytes.length} -> ${node.Data.length} bytes`)
 
-      // The actual file data is in node.Data
-      if (node.Data) {
-        console.log(`[unwrapDagPb] ✓ Unwrapped ${bytes.length} -> ${node.Data.length} bytes`)
-
-        // Log first few bytes of unwrapped data
-        const hex = Array.from(node.Data.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ')
-        console.log(`[unwrapDagPb] Unwrapped data starts with: ${hex}`)
-
-        // Validate it's actual file data (common file signatures)
-        const first = node.Data[0]
-        const second = node.Data[1]
-        const third = node.Data[2]
-
-        // JPEG: ff d8 ff
-        // PNG: 89 50 4e 47
-        // GIF: 47 49 46 38
-        // WebP: 52 49 46 46 (RIFF)
-        const isValidFileData = (
-          (first === 0xff && second === 0xd8 && third === 0xff) || // JPEG
-          (first === 0x89 && second === 0x50 && third === 0x4e && node.Data[3] === 0x47) || // PNG
-          (first === 0x47 && second === 0x49 && third === 0x46) || // GIF
-          (first === 0x52 && second === 0x49 && third === 0x46 && node.Data[3] === 0x46) // WebP/RIFF
-        )
-
-        if (isValidFileData) {
-          console.log('[unwrapDagPb] ✓ Valid file signature detected in unwrapped data')
-          return node.Data
-        } else {
-          console.warn(`[unwrapDagPb] Unwrapped data doesn't have known file signature, keeping original`)
-          console.warn(`[unwrapDagPb] First 3 bytes: 0x${first.toString(16)} 0x${second.toString(16)} 0x${third.toString(16)}`)
+          // Try to unwrap UnixFS from PBNode.Data
+          try {
+            const unixfs = UnixFS.unmarshal(node.Data)
+            if (unixfs.data) {
+              console.log(`[unwrapDagPb] ✓ UnixFS unwrap: ${node.Data.length} -> ${unixfs.data.length} bytes`)
+              const hex = Array.from(unixfs.data.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ')
+              console.log(`[unwrapDagPb] Final data starts with: ${hex}`)
+              return unixfs.data
+            }
+          } catch (unixfsErr) {
+            console.log(`[unwrapDagPb] No UnixFS layer, using PBNode.Data directly`)
+            return node.Data
+          }
         }
-      } else {
-        console.warn('[unwrapDagPb] PBNode has no Data field')
+      } catch (pbErr) {
+        console.log(`[unwrapDagPb] Not valid dag-pb: ${pbErr.message}`)
+      }
+
+      // Second try: Direct UnixFS unwrapping (no outer PBNode)
+      try {
+        const unixfs = UnixFS.unmarshal(bytes)
+        if (unixfs.data) {
+          console.log(`[unwrapDagPb] ✓ Direct UnixFS unwrap: ${bytes.length} -> ${unixfs.data.length} bytes`)
+          const hex = Array.from(unixfs.data.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ')
+          console.log(`[unwrapDagPb] Final data starts with: ${hex}`)
+          return unixfs.data
+        }
+      } catch (unixfsErr) {
+        console.warn(`[unwrapDagPb] Direct UnixFS failed: ${unixfsErr.message}`)
       }
     }
   } catch (err) {
-    console.warn('[unwrapDagPb] Failed to unwrap, using original bytes:', err.message)
+    console.warn('[unwrapDagPb] Unwrap failed, using original bytes:', err.message)
   }
   return bytes
 }
