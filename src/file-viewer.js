@@ -35,8 +35,16 @@ async function blobToDataURL(blob) {
  * Create viewer content based on file type
  */
 async function createViewer(blob, name, mimeType) {
-  // Safari iOS: Use data URLs (works). Other browsers: Use blob URLs (faster)
+  // iOS Safari workaround: Recreate blob with explicit type to fix MIME detection
+  // Safari sometimes fails when blob type is incorrect or missing
   const useSafari = isSafariOrIOS()
+
+  // For Safari, ensure blob has correct type before converting to data URL
+  if (useSafari && blob.type !== mimeType) {
+    console.log(`[FileViewer] Safari: Recreating blob with correct type ${mimeType} (was ${blob.type})`)
+    blob = new Blob([blob], { type: mimeType })
+  }
+
   const url = useSafari ? await blobToDataURL(blob) : URL.createObjectURL(blob)
 
   if (mimeType.startsWith('image/')) {

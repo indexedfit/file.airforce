@@ -36,7 +36,10 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
     loaded += chunk.length || chunk.byteLength || 0;
     onProgress(loaded, total);
   }
-  return new Blob(parts, { type: guessMime(name) });
+  const mimeType = guessMime(name);
+  const blob = new Blob(parts, { type: mimeType });
+  console.log(`[fetchFileAsBlob] Created blob for ${name}: size=${blob.size}, type=${blob.type}, chunks=${parts.length}`);
+  return blob;
 }
 
 /**
