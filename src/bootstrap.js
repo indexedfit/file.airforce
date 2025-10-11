@@ -480,8 +480,12 @@ export async function startUI() {
   }
 
   // Helper to update rooms list UI
-  function updateRoomsList() {
-    const list = getRooms();
+  function updateRoomsList(limit = null) {
+    let list = getRooms();
+    // Sort by lastSeen descending (most recent first)
+    list = list.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+    // Optionally limit to recent rooms
+    if (limit) list = list.slice(0, limit);
     renderRoomsList(list, async (r) => {
       goto("rooms", { room: r.id });
       await renderRoomsIfActive();
@@ -491,12 +495,13 @@ export async function startUI() {
   async function renderRoomsIfActive() {
     if (currentView() !== "rooms") return;
 
-    // Render rooms list
-    updateRoomsList();
-
     // Active room
     const sp = new URLSearchParams(location.search);
     const rid = sp.get("room");
+
+    // Render rooms list (always show all for navigation)
+    updateRoomsList();
+
     if (!rid) {
       console.log('No room ID in URL');
       return;
