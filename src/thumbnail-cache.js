@@ -39,12 +39,35 @@ async function openDB() {
 }
 
 /**
+ * Detect Safari/iOS for blob URL workarounds
+ */
+function isSafariOrIOS() {
+  const ua = navigator.userAgent
+  return /iPad|iPhone|iPod/.test(ua) || /^((?!chrome|android).)*safari/i.test(ua)
+}
+
+/**
+ * Convert blob to data URL (for Safari compatibility)
+ */
+async function blobToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onloadend = () => resolve(reader.result)
+    reader.onerror = reject
+    reader.readAsDataURL(blob)
+  })
+}
+
+/**
  * Generate thumbnail from image blob
  */
 async function generateImageThumbnail(blob) {
-  return new Promise((resolve, reject) => {
+  const useSafari = isSafariOrIOS()
+
+  return new Promise(async (resolve, reject) => {
     const img = new Image()
-    const url = URL.createObjectURL(blob)
+    // Use data URL for Safari, blob URL for others
+    const url = useSafari ? await blobToDataURL(blob) : URL.createObjectURL(blob)
 
     img.onload = () => {
       try {
@@ -70,16 +93,16 @@ async function generateImageThumbnail(blob) {
         ctx.drawImage(img, 0, 0, width, height)
 
         const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
-        URL.revokeObjectURL(url)
+        if (!useSafari) URL.revokeObjectURL(url)
         resolve(dataUrl)
       } catch (err) {
-        URL.revokeObjectURL(url)
+        if (!useSafari) URL.revokeObjectURL(url)
         reject(err)
       }
     }
 
     img.onerror = () => {
-      URL.revokeObjectURL(url)
+      if (!useSafari) URL.revokeObjectURL(url)
       reject(new Error('Failed to load image'))
     }
 
@@ -91,9 +114,12 @@ async function generateImageThumbnail(blob) {
  * Generate thumbnail from video blob (first frame)
  */
 async function generateVideoThumbnail(blob) {
-  return new Promise((resolve, reject) => {
+  const useSafari = isSafariOrIOS()
+
+  return new Promise(async (resolve, reject) => {
     const video = document.createElement('video')
-    const url = URL.createObjectURL(blob)
+    // Use data URL for Safari, blob URL for others
+    const url = useSafari ? await blobToDataURL(blob) : URL.createObjectURL(blob)
     video.preload = 'metadata'
     video.muted = true
     video.playsInline = true
@@ -126,16 +152,16 @@ async function generateVideoThumbnail(blob) {
         ctx.drawImage(video, 0, 0, width, height)
 
         const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
-        URL.revokeObjectURL(url)
+        if (!useSafari) URL.revokeObjectURL(url)
         resolve(dataUrl)
       } catch (err) {
-        URL.revokeObjectURL(url)
+        if (!useSafari) URL.revokeObjectURL(url)
         reject(err)
       }
     }
 
     video.onerror = () => {
-      URL.revokeObjectURL(url)
+      if (!useSafari) URL.revokeObjectURL(url)
       reject(new Error('Failed to load video'))
     }
 

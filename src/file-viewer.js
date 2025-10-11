@@ -35,11 +35,20 @@ async function blobToDataURL(blob) {
 async function createViewer(blob, name, mimeType) {
   const useSafari = isSafariOrIOS()
 
+  console.log(`[Viewer] Creating viewer for ${name}, blob size: ${blob.size}, type: ${blob.type}, iOS: ${useSafari}`)
+
   // Convert to data URL for Safari, otherwise use blob URL
   const url = useSafari ? await blobToDataURL(blob) : URL.createObjectURL(blob)
+  console.log(`[Viewer] URL created, length: ${url.length}, type: ${useSafari ? 'data URL' : 'blob URL'}`)
 
   if (mimeType.startsWith('image/')) {
     const img = document.createElement('img')
+    img.onerror = (e) => {
+      console.error(`[Viewer] Image failed to load:`, e, `URL prefix: ${url.substring(0, 100)}`)
+    }
+    img.onload = () => {
+      console.log(`[Viewer] ✓ Image loaded successfully: ${img.naturalWidth}x${img.naturalHeight}`)
+    }
     img.src = url
     img.className = 'max-w-full max-h-full object-contain'
     img.alt = name

@@ -34,11 +34,19 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
   let loaded = 0;
   try {
     for await (const chunk of fs.cat(cid)) {
+      console.log(`[fetchFileAsBlob] Got chunk ${parts.length + 1}: ${chunk.length || chunk.byteLength} bytes, type: ${chunk.constructor.name}`);
       parts.push(chunk);
       loaded += chunk.length || chunk.byteLength || 0;
       onProgress(loaded, total);
     }
     console.log(`[fetchFileAsBlob] ✓ Fetched ${parts.length} chunks, ${loaded} bytes total`);
+
+    // Log first few bytes to check if it's valid data
+    if (parts.length > 0 && parts[0].length > 0) {
+      const firstBytes = new Uint8Array(parts[0].slice(0, Math.min(20, parts[0].length)));
+      console.log(`[fetchFileAsBlob] First bytes: ${Array.from(firstBytes).map(b => b.toString(16).padStart(2, '0')).join(' ')}`);
+    }
+
     const blob = new Blob(parts, { type: guessMime(name) });
     console.log(`[fetchFileAsBlob] ✓ Created blob: ${blob.size} bytes, type: ${blob.type}`);
     return blob;
