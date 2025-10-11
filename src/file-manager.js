@@ -26,6 +26,27 @@ function unwrapDagPb(bytes) {
     if (bytes[0] === 0x0a) {
       console.log('[unwrapDagPb] ⚠️  Detected protobuf wrapper on block with raw CID codec!')
 
+      // Dump first 100 bytes to analyze the structure
+      const dumpLen = Math.min(100, bytes.length)
+      const hexDump = Array.from(bytes.slice(0, dumpLen)).map(b => b.toString(16).padStart(2, '0')).join(' ')
+      console.log(`[unwrapDagPb] First ${dumpLen} bytes:`, hexDump)
+
+      // Look for PNG signature in the data
+      for (let i = 0; i < Math.min(200, bytes.length - 8); i++) {
+        if (bytes[i] === 0x89 && bytes[i+1] === 0x50 && bytes[i+2] === 0x4e && bytes[i+3] === 0x47) {
+          console.log(`[unwrapDagPb] ✓ Found PNG signature at offset ${i}`)
+          const extracted = bytes.slice(i)
+          console.log(`[unwrapDagPb] ✓ Extracted ${extracted.length} bytes from offset ${i}`)
+          return extracted
+        }
+        if (bytes[i] === 0xff && bytes[i+1] === 0xd8 && bytes[i+2] === 0xff) {
+          console.log(`[unwrapDagPb] ✓ Found JPEG signature at offset ${i}`)
+          const extracted = bytes.slice(i)
+          console.log(`[unwrapDagPb] ✓ Extracted ${extracted.length} bytes from offset ${i}`)
+          return extracted
+        }
+      }
+
       // First try: dag-pb PBNode decoding
       try {
         const node = decodeDagPb(bytes)
@@ -37,8 +58,6 @@ function unwrapDagPb(bytes) {
             const unixfs = UnixFS.unmarshal(node.Data)
             if (unixfs.data) {
               console.log(`[unwrapDagPb] ✓ UnixFS unwrap: ${node.Data.length} -> ${unixfs.data.length} bytes`)
-              const hex = Array.from(unixfs.data.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ')
-              console.log(`[unwrapDagPb] Final data starts with: ${hex}`)
               return unixfs.data
             }
           } catch (unixfsErr) {
@@ -55,13 +74,13 @@ function unwrapDagPb(bytes) {
         const unixfs = UnixFS.unmarshal(bytes)
         if (unixfs.data) {
           console.log(`[unwrapDagPb] ✓ Direct UnixFS unwrap: ${bytes.length} -> ${unixfs.data.length} bytes`)
-          const hex = Array.from(unixfs.data.slice(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ')
-          console.log(`[unwrapDagPb] Final data starts with: ${hex}`)
           return unixfs.data
         }
       } catch (unixfsErr) {
         console.warn(`[unwrapDagPb] Direct UnixFS failed: ${unixfsErr.message}`)
       }
+
+      console.warn('[unwrapDagPb] All unwrap methods failed, returning original bytes')
     }
   } catch (err) {
     console.warn('[unwrapDagPb] Unwrap failed, using original bytes:', err.message)
