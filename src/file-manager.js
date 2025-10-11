@@ -5,6 +5,28 @@
  */
 
 import { CID } from 'multiformats/cid'
+import { UnixFS } from 'ipfs-unixfs'
+
+/**
+ * Detect and unwrap UnixFS protobuf encoding from raw blocks
+ * Some blocks arrive from bitswap with UnixFS wrapping that fs.cat() doesn't strip
+ */
+function unwrapUnixFS(bytes) {
+  try {
+    // Check if bytes start with UnixFS protobuf signature (0x0a = field 1, wire type 2)
+    if (bytes[0] === 0x0a) {
+      console.log('[unwrapUnixFS] Detected UnixFS wrapper, attempting to unwrap...')
+      const unixfs = UnixFS.unmarshal(bytes)
+      if (unixfs.data) {
+        console.log(`[unwrapUnixFS] ✓ Unwrapped ${bytes.length} -> ${unixfs.data.length} bytes`)
+        return unixfs.data
+      }
+    }
+  } catch (err) {
+    console.warn('[unwrapUnixFS] Failed to unwrap, using original bytes:', err.message)
+  }
+  return bytes
+}
 
 export function guessMime(name = "") {
   const ext = (name.split(".").pop() || "").toLowerCase();
@@ -54,10 +76,16 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
     console.log(`[fetchFileAsBlob] Calling fs.cat() with CID object...`);
     for await (const chunk of fs.cat(cid)) {
       console.log(`[fetchFileAsBlob] Got chunk: type=${chunk.constructor.name}, length=${chunk.length || chunk.byteLength || 0}`);
+
       // iOS Safari fix: Ensure chunks are standard Uint8Arrays, not subclasses
-      const standardChunk = chunk instanceof Uint8Array ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength) : chunk;
+      let standardChunk = chunk instanceof Uint8Array ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength) : chunk;
+
+      // Critical fix: Unwrap UnixFS protobuf encoding if present
+      // Bitswap blocks sometimes arrive with UnixFS wrapping that fs.cat() doesn't strip
+      standardChunk = unwrapUnixFS(standardChunk);
+
       parts.push(standardChunk);
-      loaded += chunk.length || chunk.byteLength || 0;
+      loaded += standardChunk.length || standardChunk.byteLength || 0;
       onProgress(loaded, total);
     }
 
