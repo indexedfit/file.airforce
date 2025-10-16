@@ -141,22 +141,50 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
 
   try {
     console.log(`[fetchFileAsBlob] Calling fs.cat() with CID object...`);
-    for await (const chunk of fs.cat(cid)) {
-      console.log(`[fetchFileAsBlob] Got chunk: type=${chunk.constructor.name}, length=${chunk.length || chunk.byteLength || 0}`);
+    let chunkCount = 0;
+    try {
+      for await (const chunk of fs.cat(cid)) {
+        try {
+          chunkCount++;
+          console.log(`[fetchFileAsBlob] Got chunk ${chunkCount}: type=${chunk.constructor.name}, length=${chunk.length || chunk.byteLength || 0}`);
 
-      // iOS Safari fix: Ensure chunks are standard Uint8Arrays, not subclasses
-      let standardChunk = chunk instanceof Uint8Array ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength) : chunk;
+          // iOS Safari fix: Ensure chunks are standard Uint8Arrays, not subclasses
+          let standardChunk = chunk instanceof Uint8Array ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength) : chunk;
 
-      // Critical fix: Unwrap dag-pb encoding if present
-      // Bitswap blocks sometimes arrive with dag-pb wrapping that fs.cat() doesn't strip
-      standardChunk = unwrapDagPb(standardChunk);
+          // Log first few bytes of chunk to diagnose
+          const preview = Array.from(standardChunk.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+          console.log(`[fetchFileAsBlob] Chunk ${chunkCount} first 10 bytes: ${preview}`);
 
-      parts.push(standardChunk);
-      loaded += standardChunk.length || standardChunk.byteLength || 0;
-      onProgress(loaded, total);
+          // Critical fix: Unwrap dag-pb encoding if present
+          // NOTE: fs.cat() should already unwrap, but there's a Helia bug where some blocks
+          // arrive with dag-pb wrapper. Only unwrap if CID indicated raw codec (0x55).
+          // For dag-pb CIDs (0x70), fs.cat() handles unwrapping correctly.
+          if (cid.code === 0x55) {
+            console.log(`[fetchFileAsBlob] CID is raw codec, attempting unwrap if needed...`);
+            const beforeLen = standardChunk.length;
+            standardChunk = unwrapDagPb(standardChunk);
+            if (standardChunk.length !== beforeLen) {
+              console.log(`[fetchFileAsBlob] Unwrapped chunk ${chunkCount}: ${beforeLen} -> ${standardChunk.length} bytes`);
+            }
+          } else {
+            console.log(`[fetchFileAsBlob] CID is dag-pb codec (0x${cid.code.toString(16)}), skipping unwrap`);
+          }
+
+          parts.push(standardChunk);
+          loaded += standardChunk.length || standardChunk.byteLength || 0;
+          console.log(`[fetchFileAsBlob] Chunk ${chunkCount} added to parts array, total loaded: ${loaded} bytes`);
+          onProgress(loaded, total);
+        } catch (chunkErr) {
+          console.error(`[fetchFileAsBlob] ✗ Error processing chunk ${chunkCount}:`, chunkErr);
+          throw chunkErr;
+        }
+      }
+    } catch (iterErr) {
+      console.error(`[fetchFileAsBlob] ✗ Error during fs.cat() iteration after ${chunkCount} chunks:`, iterErr);
+      throw iterErr;
     }
 
-    console.log(`[fetchFileAsBlob] All chunks received: total=${parts.length} chunks, ${loaded} bytes`);
+    console.log(`[fetchFileAsBlob] ✓ fs.cat() iteration completed: ${chunkCount} chunks, ${loaded} bytes`);
 
     const mimeType = guessMime(name);
     console.log(`[fetchFileAsBlob] MIME type from name: "${mimeType}"`);
