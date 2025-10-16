@@ -31,7 +31,7 @@ function unwrapDagPb(bytes) {
       const hexDump = Array.from(bytes.slice(0, dumpLen)).map(b => b.toString(16).padStart(2, '0')).join(' ')
       console.log(`[unwrapDagPb] First ${dumpLen} bytes:`, hexDump)
 
-      // Look for PNG signature in the data
+      // Look for file signatures in the data
       for (let i = 0; i < Math.min(200, bytes.length - 8); i++) {
         if (bytes[i] === 0x89 && bytes[i+1] === 0x50 && bytes[i+2] === 0x4e && bytes[i+3] === 0x47) {
           console.log(`[unwrapDagPb] ✓ Found PNG signature at offset ${i}`)
@@ -41,6 +41,12 @@ function unwrapDagPb(bytes) {
         }
         if (bytes[i] === 0xff && bytes[i+1] === 0xd8 && bytes[i+2] === 0xff) {
           console.log(`[unwrapDagPb] ✓ Found JPEG signature at offset ${i}`)
+          const extracted = bytes.slice(i)
+          console.log(`[unwrapDagPb] ✓ Extracted ${extracted.length} bytes from offset ${i}`)
+          return extracted
+        }
+        if (bytes[i] === 0x25 && bytes[i+1] === 0x50 && bytes[i+2] === 0x44 && bytes[i+3] === 0x46) {
+          console.log(`[unwrapDagPb] ✓ Found PDF signature at offset ${i}`)
           const extracted = bytes.slice(i)
           console.log(`[unwrapDagPb] ✓ Extracted ${extracted.length} bytes from offset ${i}`)
           return extracted
@@ -133,24 +139,65 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
   const parts = [];
   let loaded = 0;
 
+  // Timeout for chunk iteration (30 seconds per chunk)
+  const CHUNK_TIMEOUT = 30000;
+  let lastChunkTime = Date.now();
+  const timeoutChecker = setInterval(() => {
+    const elapsed = Date.now() - lastChunkTime;
+    if (elapsed > CHUNK_TIMEOUT) {
+      console.error(`[fetchFileAsBlob] ✗ Timeout waiting for next chunk (${elapsed}ms elapsed)`);
+    }
+  }, 5000);
+
   try {
     console.log(`[fetchFileAsBlob] Calling fs.cat() with CID object...`);
-    for await (const chunk of fs.cat(cid)) {
-      console.log(`[fetchFileAsBlob] Got chunk: type=${chunk.constructor.name}, length=${chunk.length || chunk.byteLength || 0}`);
+    let chunkCount = 0;
+    try {
+      for await (const chunk of fs.cat(cid)) {
+        try {
+          chunkCount++;
+          lastChunkTime = Date.now(); // Reset timeout timer
+          console.log(`[fetchFileAsBlob] Got chunk ${chunkCount}: type=${chunk.constructor.name}, length=${chunk.length || chunk.byteLength || 0}`);
 
-      // iOS Safari fix: Ensure chunks are standard Uint8Arrays, not subclasses
-      let standardChunk = chunk instanceof Uint8Array ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength) : chunk;
+          // iOS Safari fix: Ensure chunks are standard Uint8Arrays, not subclasses
+          let standardChunk = chunk instanceof Uint8Array ? new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength) : chunk;
 
-      // Critical fix: Unwrap dag-pb encoding if present
-      // Bitswap blocks sometimes arrive with dag-pb wrapping that fs.cat() doesn't strip
-      standardChunk = unwrapDagPb(standardChunk);
+          // Log first few bytes of chunk to diagnose
+          const preview = Array.from(standardChunk.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+          console.log(`[fetchFileAsBlob] Chunk ${chunkCount} first 10 bytes: ${preview}`);
 
-      parts.push(standardChunk);
-      loaded += standardChunk.length || standardChunk.byteLength || 0;
-      onProgress(loaded, total);
+          // Critical fix: Unwrap dag-pb encoding if present
+          // NOTE: fs.cat() should already unwrap, but there's a Helia bug where some blocks
+          // arrive with dag-pb wrapper. Only unwrap if CID indicated raw codec (0x55).
+          // For dag-pb CIDs (0x70), fs.cat() handles unwrapping correctly.
+          if (cid.code === 0x55) {
+            console.log(`[fetchFileAsBlob] CID is raw codec, attempting unwrap if needed...`);
+            const beforeLen = standardChunk.length;
+            standardChunk = unwrapDagPb(standardChunk);
+            if (standardChunk.length !== beforeLen) {
+              console.log(`[fetchFileAsBlob] Unwrapped chunk ${chunkCount}: ${beforeLen} -> ${standardChunk.length} bytes`);
+            }
+          } else {
+            console.log(`[fetchFileAsBlob] CID is dag-pb codec (0x${cid.code.toString(16)}), skipping unwrap`);
+          }
+
+          parts.push(standardChunk);
+          loaded += standardChunk.length || standardChunk.byteLength || 0;
+          console.log(`[fetchFileAsBlob] Chunk ${chunkCount} added to parts array, total loaded: ${loaded} bytes`);
+          onProgress(loaded, total);
+        } catch (chunkErr) {
+          console.error(`[fetchFileAsBlob] ✗ Error processing chunk ${chunkCount}:`, chunkErr);
+          throw chunkErr;
+        }
+      }
+    } catch (iterErr) {
+      console.error(`[fetchFileAsBlob] ✗ Error during fs.cat() iteration after ${chunkCount} chunks:`, iterErr);
+      clearInterval(timeoutChecker);
+      throw iterErr;
     }
 
-    console.log(`[fetchFileAsBlob] All chunks received: total=${parts.length} chunks, ${loaded} bytes`);
+    clearInterval(timeoutChecker);
+    console.log(`[fetchFileAsBlob] ✓ fs.cat() iteration completed: ${chunkCount} chunks, ${loaded} bytes`);
 
     const mimeType = guessMime(name);
     console.log(`[fetchFileAsBlob] MIME type from name: "${mimeType}"`);
@@ -176,6 +223,7 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
 
     return blob;
   } catch (err) {
+    clearInterval(timeoutChecker);
     console.error(`[fetchFileAsBlob] ✗ ERROR fetching ${name}:`, err);
     throw err;
   }
@@ -218,13 +266,44 @@ export async function addFilesAndCreateManifest(fs, files, onProgress = () => {}
   let done = 0;
   const total = files.length;
 
+  // Track blocks stored during upload
+  const blocksStored = [];
+  globalThis.wcOnBlockPut = (info) => {
+    blocksStored.push(info);
+    console.log(`[addFiles] Block stored: ${info.cid.slice(0, 20)}... (${info.size} bytes) - total blocks: ${blocksStored.length}`);
+  };
+
   for (const f of files) {
     console.log(`[addFiles] Processing file ${done + 1}/${total}: ${f.name} (${f.size} bytes)`);
     try {
       const data = new Uint8Array(await f.arrayBuffer());
-      console.log(`[addFiles] Read ${data.length} bytes, adding to blockstore...`);
+      console.log(`[addFiles] Read ${data.length} bytes from file`);
+
+      // Log first 20 bytes to verify we're reading the file correctly
+      const preview = Array.from(data.slice(0, 20)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      console.log(`[addFiles] First 20 bytes of ${f.name}:`, preview);
+
+      // Detect file signature to confirm we have raw file data
+      let detectedType = 'unknown';
+      if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) {
+        detectedType = 'PNG';
+      } else if (data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+        detectedType = 'JPEG';
+      } else if (data[0] === 0x25 && data[1] === 0x50 && data[2] === 0x44 && data[3] === 0x46) {
+        detectedType = 'PDF';
+      } else if (data[0] === 0x0a) {
+        detectedType = 'dag-pb (UNEXPECTED!)';
+        console.error(`[addFiles] ⚠️  File ${f.name} already has dag-pb wrapper BEFORE addBytes!`);
+      }
+      console.log(`[addFiles] Detected file type: ${detectedType}`);
+
+      console.log(`[addFiles] Calling fs.addBytes()...`);
       const cid = await fs.addBytes(data);
-      console.log(`[addFiles] Added with CID: ${cid.toString()}`);
+
+      console.log(`[addFiles] ✓ fs.addBytes() returned CID: ${cid.toString()}`);
+      console.log(`[addFiles] CID codec: ${cid.code} (0x${cid.code.toString(16)}) - raw=0x55, dag-pb=0x70`);
+      console.log(`[addFiles] CID multihash: ${cid.multihash.code} (0x${cid.multihash.code.toString(16)})`);
+
       manifest.files.push({ name: f.name, size: f.size, cid: cid.toString() });
       done++;
       onProgress(done, total);
@@ -235,6 +314,12 @@ export async function addFilesAndCreateManifest(fs, files, onProgress = () => {}
   }
 
   console.log(`[addFiles] Completed, manifest has ${manifest.files.length} files`);
+  console.log(`[addFiles] Total blocks stored: ${blocksStored.length}`);
+  console.log(`[addFiles] Block CIDs:`, blocksStored.map(b => b.cid.slice(0, 20) + '...'));
+
+  // Clean up
+  delete globalThis.wcOnBlockPut;
+
   return manifest;
 }
 
