@@ -31,7 +31,7 @@ function unwrapDagPb(bytes) {
       const hexDump = Array.from(bytes.slice(0, dumpLen)).map(b => b.toString(16).padStart(2, '0')).join(' ')
       console.log(`[unwrapDagPb] First ${dumpLen} bytes:`, hexDump)
 
-      // Look for PNG signature in the data
+      // Look for file signatures in the data
       for (let i = 0; i < Math.min(200, bytes.length - 8); i++) {
         if (bytes[i] === 0x89 && bytes[i+1] === 0x50 && bytes[i+2] === 0x4e && bytes[i+3] === 0x47) {
           console.log(`[unwrapDagPb] ✓ Found PNG signature at offset ${i}`)
@@ -41,6 +41,12 @@ function unwrapDagPb(bytes) {
         }
         if (bytes[i] === 0xff && bytes[i+1] === 0xd8 && bytes[i+2] === 0xff) {
           console.log(`[unwrapDagPb] ✓ Found JPEG signature at offset ${i}`)
+          const extracted = bytes.slice(i)
+          console.log(`[unwrapDagPb] ✓ Extracted ${extracted.length} bytes from offset ${i}`)
+          return extracted
+        }
+        if (bytes[i] === 0x25 && bytes[i+1] === 0x50 && bytes[i+2] === 0x44 && bytes[i+3] === 0x46) {
+          console.log(`[unwrapDagPb] ✓ Found PDF signature at offset ${i}`)
           const extracted = bytes.slice(i)
           console.log(`[unwrapDagPb] ✓ Extracted ${extracted.length} bytes from offset ${i}`)
           return extracted
@@ -222,9 +228,33 @@ export async function addFilesAndCreateManifest(fs, files, onProgress = () => {}
     console.log(`[addFiles] Processing file ${done + 1}/${total}: ${f.name} (${f.size} bytes)`);
     try {
       const data = new Uint8Array(await f.arrayBuffer());
-      console.log(`[addFiles] Read ${data.length} bytes, adding to blockstore...`);
+      console.log(`[addFiles] Read ${data.length} bytes from file`);
+
+      // Log first 20 bytes to verify we're reading the file correctly
+      const preview = Array.from(data.slice(0, 20)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+      console.log(`[addFiles] First 20 bytes of ${f.name}:`, preview);
+
+      // Detect file signature to confirm we have raw file data
+      let detectedType = 'unknown';
+      if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) {
+        detectedType = 'PNG';
+      } else if (data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+        detectedType = 'JPEG';
+      } else if (data[0] === 0x25 && data[1] === 0x50 && data[2] === 0x44 && data[3] === 0x46) {
+        detectedType = 'PDF';
+      } else if (data[0] === 0x0a) {
+        detectedType = 'dag-pb (UNEXPECTED!)';
+        console.error(`[addFiles] ⚠️  File ${f.name} already has dag-pb wrapper BEFORE addBytes!`);
+      }
+      console.log(`[addFiles] Detected file type: ${detectedType}`);
+
+      console.log(`[addFiles] Calling fs.addBytes()...`);
       const cid = await fs.addBytes(data);
-      console.log(`[addFiles] Added with CID: ${cid.toString()}`);
+
+      console.log(`[addFiles] ✓ fs.addBytes() returned CID: ${cid.toString()}`);
+      console.log(`[addFiles] CID codec: ${cid.code} (0x${cid.code.toString(16)}) - raw=0x55, dag-pb=0x70`);
+      console.log(`[addFiles] CID multihash: ${cid.multihash.code} (0x${cid.multihash.code.toString(16)})`);
+
       manifest.files.push({ name: f.name, size: f.size, cid: cid.toString() });
       done++;
       onProgress(done, total);
