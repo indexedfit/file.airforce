@@ -182,6 +182,14 @@ function showInvite(link) {
 
 export async function startUI() {
   ({ helia, fs, libp2p } = await startHelia());
+
+  // Set up global block tracking for diagnostics
+  const allBlocksPut = [];
+  globalThis.wcOnBlockPut = (info) => {
+    allBlocksPut.push(info);
+    console.log(`[Blockstore] Block PUT: ${info.cid.slice(0, 20)}... (${info.size} bytes) - total: ${allBlocksPut.length}`);
+  };
+
   rooms = createRoomManager(helia, fs);
   thumbnailManager = await createThumbnailManager(fs);
 

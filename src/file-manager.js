@@ -266,13 +266,6 @@ export async function addFilesAndCreateManifest(fs, files, onProgress = () => {}
   let done = 0;
   const total = files.length;
 
-  // Track blocks stored during upload
-  const blocksStored = [];
-  globalThis.wcOnBlockPut = (info) => {
-    blocksStored.push(info);
-    console.log(`[addFiles] Block stored: ${info.cid.slice(0, 20)}... (${info.size} bytes) - total blocks: ${blocksStored.length}`);
-  };
-
   for (const f of files) {
     console.log(`[addFiles] Processing file ${done + 1}/${total}: ${f.name} (${f.size} bytes)`);
     try {
@@ -314,12 +307,6 @@ export async function addFilesAndCreateManifest(fs, files, onProgress = () => {}
   }
 
   console.log(`[addFiles] Completed, manifest has ${manifest.files.length} files`);
-  console.log(`[addFiles] Total blocks stored: ${blocksStored.length}`);
-  console.log(`[addFiles] Block CIDs:`, blocksStored.map(b => b.cid.slice(0, 20) + '...'));
-
-  // Clean up
-  delete globalThis.wcOnBlockPut;
-
   return manifest;
 }
 
