@@ -139,6 +139,16 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
   const parts = [];
   let loaded = 0;
 
+  // Timeout for chunk iteration (30 seconds per chunk)
+  const CHUNK_TIMEOUT = 30000;
+  let lastChunkTime = Date.now();
+  const timeoutChecker = setInterval(() => {
+    const elapsed = Date.now() - lastChunkTime;
+    if (elapsed > CHUNK_TIMEOUT) {
+      console.error(`[fetchFileAsBlob] ✗ Timeout waiting for next chunk (${elapsed}ms elapsed)`);
+    }
+  }, 5000);
+
   try {
     console.log(`[fetchFileAsBlob] Calling fs.cat() with CID object...`);
     let chunkCount = 0;
@@ -146,6 +156,7 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
       for await (const chunk of fs.cat(cid)) {
         try {
           chunkCount++;
+          lastChunkTime = Date.now(); // Reset timeout timer
           console.log(`[fetchFileAsBlob] Got chunk ${chunkCount}: type=${chunk.constructor.name}, length=${chunk.length || chunk.byteLength || 0}`);
 
           // iOS Safari fix: Ensure chunks are standard Uint8Arrays, not subclasses
@@ -181,9 +192,11 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
       }
     } catch (iterErr) {
       console.error(`[fetchFileAsBlob] ✗ Error during fs.cat() iteration after ${chunkCount} chunks:`, iterErr);
+      clearInterval(timeoutChecker);
       throw iterErr;
     }
 
+    clearInterval(timeoutChecker);
     console.log(`[fetchFileAsBlob] ✓ fs.cat() iteration completed: ${chunkCount} chunks, ${loaded} bytes`);
 
     const mimeType = guessMime(name);
@@ -210,6 +223,7 @@ export async function fetchFileAsBlob(fs, cid, name, onProgress = () => {}) {
 
     return blob;
   } catch (err) {
+    clearInterval(timeoutChecker);
     console.error(`[fetchFileAsBlob] ✗ ERROR fetching ${name}:`, err);
     throw err;
   }
@@ -252,6 +266,13 @@ export async function addFilesAndCreateManifest(fs, files, onProgress = () => {}
   let done = 0;
   const total = files.length;
 
+  // Track blocks stored during upload
+  const blocksStored = [];
+  globalThis.wcOnBlockPut = (info) => {
+    blocksStored.push(info);
+    console.log(`[addFiles] Block stored: ${info.cid.slice(0, 20)}... (${info.size} bytes) - total blocks: ${blocksStored.length}`);
+  };
+
   for (const f of files) {
     console.log(`[addFiles] Processing file ${done + 1}/${total}: ${f.name} (${f.size} bytes)`);
     try {
@@ -293,6 +314,12 @@ export async function addFilesAndCreateManifest(fs, files, onProgress = () => {}
   }
 
   console.log(`[addFiles] Completed, manifest has ${manifest.files.length} files`);
+  console.log(`[addFiles] Total blocks stored: ${blocksStored.length}`);
+  console.log(`[addFiles] Block CIDs:`, blocksStored.map(b => b.cid.slice(0, 20) + '...'));
+
+  // Clean up
+  delete globalThis.wcOnBlockPut;
+
   return manifest;
 }
 
