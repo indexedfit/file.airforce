@@ -17,7 +17,8 @@
     "hub": "node server/hub.js",
     "hub:relay": "node server/hub.js --relay-only",
     "hub:mirror": "node server/hub.js --mirror-only",
-    "hub:sync": "node server/hub.js --sync-only"
+    "hub:sync": "node server/hub.js --sync-only",
+    "icons:generate": "bash scripts/generate-icons.sh"
   },
   "dependencies": {
     "@chainsafe/libp2p-gossipsub": "^14.1.1",
@@ -46,9 +47,7 @@
     "libp2p": "^2.8.12",
     "log-update": "^6.1.0",
     "pretty-ms": "^9.0.0",
-    "qrcode": "^1.5.3",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
+    "qrcode": "^1.5.4",
     "uint8arrays": "^5.1.0",
     "ws": "^8.18.3",
     "y-websocket": "^3.0.0",
@@ -56,9 +55,10 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.47.2",
-    "@vitejs/plugin-react": "^4.3.3",
+    "@sveltejs/vite-plugin-svelte": "^4.0.4",
     "jsdom": "^24.1.0",
     "rimraf": "^5.0.7",
+    "svelte": "^5.41.1",
     "vite": "^5.4.8"
   }
 }
