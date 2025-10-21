@@ -1,5 +1,4 @@
-// Minimal browser Blockstore using OPFS with IDB fallback.
-// Methods used by Helia: open, close (noop), get, put, has, delete, putMany/getMany (best effort).
+// Minimal browser Blockstore using OPFS with IDB fallback
 
 import { supportsOPFS } from './opfs-utils.js'
 
@@ -54,29 +53,16 @@ function openIDB(name = 'wc-blocks') {
 
 export async function createOPFSBlockstore(rootName = 'wc-blocks') {
   if (supportsOPFS()) {
-    console.log('[Blockstore] Using OPFS');
+    console.log('[Blockstore] Using OPFS')
     const { blocks } = await createOPFSRoot(rootName)
     const api = {
-      async open() {},
-      async close() {},
+      async open() { },
+      async close() { },
       async put(cid, bytes) {
-        // Debug: Check for codec/encoding mismatch
-        const cidStr = cid.toString()
-        const isRawCodec = cidStr.startsWith('bafkrei')  // raw codec
-        const hasDagPbSig = bytes[0] === 0x0a  // dag-pb signature
-
-        if (isRawCodec && hasDagPbSig) {
-          console.warn(`[Blockstore] ⚠️  CODEC MISMATCH detected during PUT`)
-          console.warn(`[Blockstore] CID: ${cidStr.slice(0, 20)}... (raw codec 0x55)`)
-          console.warn(`[Blockstore] Block starts with 0x0a (dag-pb signature)`)
-          console.warn(`[Blockstore] First 10 bytes:`, Array.from(bytes.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' '))
-          console.trace('[Blockstore] Call stack:')
-        }
-
         const [a, b, name] = splitCid(cid)
         const dir = await ensurePath(blocks, [a, b])
         await writeFile(dir, `${name}.bin`, bytes)
-        try { globalThis.wcOnBlockPut?.({ cid: cid.toString(), size: bytes?.length || 0 }) } catch {}
+        try { globalThis.wcOnBlockPut?.({ cid: cid.toString(), size: bytes?.length || 0 }) } catch { }
         return cid
       },
       async get(cid) {
@@ -112,33 +98,19 @@ export async function createOPFSBlockstore(rootName = 'wc-blocks') {
     return api
   }
 
-  console.log('[Blockstore] Falling back to IndexedDB');
+  console.log('[Blockstore] Using IndexedDB')
   const db = await openIDB(rootName)
-  console.log('[Blockstore] IndexedDB opened successfully');
   const tx = (mode) => db.transaction('blocks', mode).objectStore('blocks')
   const api = {
-    async open() {},
+    async open() { },
     async close() { db.close() },
     async put(cid, bytes) {
-      // Debug: Check for codec/encoding mismatch
-      const cidStr = cid.toString()
-      const isRawCodec = cidStr.startsWith('bafkrei')  // raw codec
-      const hasDagPbSig = bytes[0] === 0x0a  // dag-pb signature
-
-      if (isRawCodec && hasDagPbSig) {
-        console.warn(`[Blockstore IDB] ⚠️  CODEC MISMATCH detected during PUT`)
-        console.warn(`[Blockstore IDB] CID: ${cidStr.slice(0, 20)}... (raw codec 0x55)`)
-        console.warn(`[Blockstore IDB] Block starts with 0x0a (dag-pb signature)`)
-        console.warn(`[Blockstore IDB] First 10 bytes:`, Array.from(bytes.slice(0, 10)).map(b => b.toString(16).padStart(2, '0')).join(' '))
-        console.trace('[Blockstore IDB] Call stack:')
-      }
-
       await new Promise((res, rej) => {
         const req = tx('readwrite').put(bytes, cid.toString())
         req.onsuccess = () => res()
         req.onerror = () => rej(req.error)
       })
-      try { globalThis.wcOnBlockPut?.({ cid: cid.toString(), size: bytes?.length || 0 }) } catch {}
+      try { globalThis.wcOnBlockPut?.({ cid: cid.toString(), size: bytes?.length || 0 }) } catch { }
       return cid
     },
     async get(cid) {
